@@ -1,9 +1,8 @@
 # asx
 
-> Multi-account switcher for LLM coding tools.  
-> (formerly `as` — renamed to avoid conflict with the system assembler)
+**Multi-account switcher for LLM coding tools.**
 
-**Store credentials securely in a single OS Keychain vault and switch between accounts instantly.**
+Store credentials securely in a single OS Keychain vault and switch between accounts instantly.
 
 ## ✨ Features
 
@@ -14,7 +13,9 @@
   - Codex: 5h / 7d windows via ChatGPT backend
   - Grok / xAI / Z.AI: credits + rate limits
 - **Shortcuts**: `cc`, `cx`, `gk`, `cs`
-- **Scoped Execution**: `asx run grok personal -- claude "explain this"`
+- **Scoped Execution**: `asx run personal -- claude "explain this"`
+- **Convenient Auto-Add**: `asx add` (or `asx add <provider>`) auto-detects current sessions for main providers (claude-code, codex, grok, cursor). Names are globally unique and optional (defaults to email local part or "personal").
+- **Provider-less Commands**: `asx run <name>`, `asx remove <name>` work without provider.
 - **Email Tracking**: Stores associated email when adding accounts.
 - **Cross-platform**: Strong support on macOS, works on Linux/Windows.
 
@@ -41,14 +42,13 @@ npm install -g .
 # List accounts
 asx list
 
-# Add accounts (login with the real tool first, then snapshot)
+# Auto-add current sessions (or specify provider)
+asx add
 asx add claude-code work
-asx add claude-code personal
 asx add codex personal
-asx add grok personal
 
-# Switch
-asx cc work           # shortcut for claude-code
+# Switch using shortcuts
+asx cc work           # claude-code
 asx gk personal       # grok
 
 # See what's active
@@ -57,8 +57,8 @@ asx status
 # Check usage (with nice bars)
 asx usage
 
-# Run a command with a specific account
-asx run claude-code work -- claude "refactor this function"
+# Run a command with a specific account (no provider needed)
+asx run personal -- claude "refactor this function"
 ```
 
 ## 📋 Commands
@@ -66,16 +66,16 @@ asx run claude-code work -- claude "refactor this function"
 | Command                  | Description                              |
 |--------------------------|------------------------------------------|
 | `asx list [provider]`    | List accounts (or for one provider)      |
-| `asx add <provider> <name>` | Add current logged-in account         |
+| `asx add [provider] [name]` | Auto-add (or for specific provider); name optional |
 | `asx switch <provider> <name>` | Switch active account                 |
 | `asx cc [name]`          | Shortcut: claude-code cycle/switch       |
 | `asx cx [name]`          | Shortcut: codex                          |
 | `asx gk [name]`          | Shortcut: grok                           |
 | `asx cs [name]`          | Shortcut: cursor                         |
-| `asx usage [provider]`   | Show live quota with bars                |
+| `asx usage [provider] [name]` | Show live quota with bars (name optional) |
 | `asx status [provider]`  | Show currently active accounts           |
-| `asx run <provider> <name> -- <cmd...>` | Run command with specific account |
-| `asx remove <provider> <name>` | Remove stored account                |
+| `asx run <name> -- <cmd...>` | Run command with account (provider resolved by unique name) |
+| `asx remove <name>` | Remove account (provider optional if name unique) |
 
 ## 🛠 Supported Providers
 
