@@ -48,7 +48,14 @@ export function addAccount(rec: Omit<AccountRecord, 'addedAt'> & { addedAt?: str
     ...rec,
     addedAt: rec.addedAt || new Date().toISOString(),
   };
-  // dedupe by provider+name
+
+  // Enforce global name uniqueness (names identify accounts across providers)
+  const conflict = store.accounts.find(a => a.name === full.name && a.provider !== full.provider);
+  if (conflict) {
+    throw new Error(`Name "${full.name}" is already used by provider "${conflict.provider}". Account names must be unique.`);
+  }
+
+  // dedupe by provider+name (overwrite for same provider)
   store.accounts = store.accounts.filter(a => !(a.provider === full.provider && a.name === full.name));
   store.accounts.push(full);
   saveStore(store);
@@ -94,4 +101,25 @@ export function getNextAccount(provider: string): string | null {
   const idx = names.indexOf(active);
   if (idx === -1) return names[0];
   return names[(idx + 1) % names.length];
+}
+
+// Support for provider-less name operations (names are globally unique)
+export function getAccountByName(name: string): AccountRecord | undefined {
+  const matches = loadStore().accounts.filter(a => a.name === name);
+  if (matches.length > 1) {
+    throw new Error(`Name "${name}" is ambiguous (matches multiple providers). Use provider/name form.`);
+  }
+  return matches[0];
+}
+
+export function removeAccountByName(name: string): boolean {
+  const store = loadStore();
+  const before = store.accounts.length;
+  const matches = store.accounts.filter(a => a.name === name);
+  if (matches.length > 1) {
+    throw new Error(`Name "${name}" is ambiguous (matches multiple providers).`);
+  }
+  store.accounts = store.accounts.filter(a => a.name !== name);
+  saveStore(store);
+  return store.accounts.length < before;
 }
