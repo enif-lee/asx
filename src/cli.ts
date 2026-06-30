@@ -364,7 +364,7 @@ function getBypassFlags(provider: string): string[] {
 program
   .command('exec <name>')
   .alias('e')
-  .description('Run the native CLI (claude/codex/grok/...) under an isolated profile.\nUse -b/--bypass to auto-inject full permission flags per provider.\nExamples:\n  asx e ed.codex\n  asx e ed.codex "hello"\n  asx e ed.codex -b "do something dangerous"')
+  .description('Run the native CLI (claude/codex/grok/...) under an isolated profile.\nOptional <target> after name routes via ASX Proxy when providers differ (e.g. asx e ed.codex claude).\nUse -b/--bypass to auto-inject full permission flags per provider.\nExamples:\n  asx e ed.codex\n  asx e ed.codex claude "hello"\n  asx e ed.codex -b "do something dangerous"')
   .option('-b, --bypass', 'Automatically inject full-access permission bypass flags for the target provider')
   .allowUnknownOption(true)
   .allowExcessArguments(true)
@@ -376,64 +376,130 @@ program
       process.exit(1);
     }
 
-    const provider = acct.provider;
+    const profileProvider = acct.provider;
     const accountName = acct.name;
-    const isCurrent = getActive(provider) === accountName;
 
-    const nativeBin = provider.includes('claude') ? 'claude'
-      : provider === 'codex' ? 'codex'
-      : provider === 'grok' ? 'grok'
+    // --- Determine agent vs backend according to spec ---
+    // When both profile and provider specified:
+    //   - agent (binary to launch) follows the specified provider
+    //   - backend follows the profile
+    // When provider omitted: both follow the profile's provider.
+    const { normalizeProvider, isKnownProvider } = await import('./providers/index.js');
+    const argv = process.argv;
+    const subIdx = argv.findIndex((v, i) => (v === 'exec' || v === 'e') && argv[i + 1] === name);
+    const forwardStart = subIdx >= 0 ? subIdx + 2 : argv.length;
+    let rawAfter = argv.slice(forwardStart).filter((a): a is string => typeof a === 'string');
+
+    let specifiedProvider: string | undefined;
+    const possible = rawAfter[0];
+    if (possible && !possible.startsWith('-') && isKnownProvider(possible)) {
+      specifiedProvider = normalizeProvider(possible);
+      rawAfter = rawAfter.slice(1);
+    }
+
+    const agentProvider = specifiedProvider || profileProvider;
+    const isCross = !!specifiedProvider && normalizeProvider(specifiedProvider) !== normalizeProvider(profileProvider);
+
+    const nativeBin = agentProvider.includes('claude') ? 'claude'
+      : agentProvider === 'codex' ? 'codex'
+      : agentProvider === 'grok' ? 'grok'
       : null;
 
     if (!nativeBin) {
-      console.error(chalk.red(`Exec is not supported for provider '${provider}'.`));
+      console.error(chalk.red(`Exec is not supported for provider '${agentProvider}'.`));
       process.exit(1);
     }
 
+    const isCurrent = getActive(profileProvider) === accountName;
+
     let env = { ...process.env };
     let tmpDir: string | null = null;
+    let proxyHandle: { url?: string; stop: () => void } | null = null;
 
     const cleanup = () => {
+      if (proxyHandle) {
+        try { proxyHandle.stop(); } catch {}
+      }
       if (tmpDir && fs.existsSync(tmpDir)) {
         try { fs.rmSync(tmpDir, { recursive: true, force: true }); } catch {}
       }
     };
 
     try {
-      if (!isCurrent) {
-        const cred = await getSecret(provider, accountName);
-        if (!cred) {
-          console.error(chalk.red(`No stored credential for ${provider}/${accountName}`));
-          process.exit(1);
-        }
-
+      // Isolation policy:
+      // - Always isolate when cross (different agent vs profile provider)
+      // - When not cross, follow the original "isCurrent" logic for the profile.
+      const forceIsolation = isCross;
+      if (!isCurrent || forceIsolation) {
         tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), `asx-${accountName.replace(/[^a-zA-Z0-9_-]/g, '_')}-`));
         fs.chmodSync(tmpDir, 0o700);
 
-        if (provider === 'codex') {
-          const d = path.join(tmpDir, 'codex');
-          fs.mkdirSync(d, { recursive: true });
-          fs.writeFileSync(path.join(d, 'auth.json'), cred, { mode: 0o600 });
-          env.CODEX_HOME = d;
-        } else if (provider.includes('claude')) {
-          const d = path.join(tmpDir, 'claude');
-          fs.mkdirSync(d, { recursive: true });
-          fs.writeFileSync(path.join(d, '.credentials.json'), cred, { mode: 0o600 });
-          env.CLAUDE_CONFIG_DIR = d;
-        } else if (provider === 'grok') {
-          const d = path.join(tmpDir, 'grok');
-          fs.mkdirSync(d, { recursive: true });
-          fs.writeFileSync(path.join(d, 'auth.json'), cred, { mode: 0o600 });
-          env.GROK_HOME = d;
+        if (!isCross) {
+          // Same provider: we can safely copy the profile's credential into the agent's temp dir
+          const cred = await getSecret(profileProvider, accountName);
+          if (!cred) {
+            console.error(chalk.red(`No stored credential for ${profileProvider}/${accountName}`));
+            process.exit(1);
+          }
+
+          if (agentProvider === 'codex') {
+            const d = path.join(tmpDir, 'codex');
+            fs.mkdirSync(d, { recursive: true });
+            fs.writeFileSync(path.join(d, 'auth.json'), cred, { mode: 0o600 });
+            env.CODEX_HOME = d;
+          } else if (agentProvider.includes('claude')) {
+            const d = path.join(tmpDir, 'claude');
+            fs.mkdirSync(d, { recursive: true });
+            fs.writeFileSync(path.join(d, '.credentials.json'), cred, { mode: 0o600 });
+            env.CLAUDE_CONFIG_DIR = d;
+          } else if (agentProvider === 'grok') {
+            const d = path.join(tmpDir, 'grok');
+            fs.mkdirSync(d, { recursive: true });
+            fs.writeFileSync(path.join(d, 'auth.json'), cred, { mode: 0o600 });
+            env.GROK_HOME = d;
+          }
+        } else {
+          // Cross case: create temp dir for the *agent* (to isolate its local state).
+          // Seed a minimal "logged in" state for the agent binary so it doesn't force
+          // its own login/welcome screen. The proxy will handle the real backend auth
+          // using the profile's credential.
+          if (agentProvider === 'codex') {
+            const d = path.join(tmpDir, 'codex');
+            fs.mkdirSync(d, { recursive: true });
+            env.CODEX_HOME = d;
+            // Seed minimal Codex auth.json so it thinks it's logged in (structure from real auth).
+            // If the profile itself is codex, prefer the real one for better fidelity.
+            let codexAuth = '{"email":"proxy@asx.local","tokens":{"id_token":"dummy"}}';
+            if (profileProvider === 'codex') {
+              const real = await getSecret(profileProvider, accountName);
+              if (real) codexAuth = real;
+            }
+            try {
+              fs.writeFileSync(path.join(d, 'auth.json'), codexAuth, { mode: 0o600 });
+            } catch {}
+          } else if (agentProvider.includes('claude')) {
+            const d = path.join(tmpDir, 'claude');
+            fs.mkdirSync(d, { recursive: true });
+            env.CLAUDE_CONFIG_DIR = d;
+            // Seed a minimal credentials so Claude Code skips full sign-in when using gateway token.
+            const dummyCred = JSON.stringify({
+              claudeAiOauth: { accessToken: 'asx-proxy-dummy' }
+            });
+            try {
+              fs.writeFileSync(path.join(d, '.credentials.json'), dummyCred, { mode: 0o600 });
+            } catch {}
+          } else if (agentProvider === 'grok') {
+            // No auth.json needed: injected config.toml uses a custom model with a dummy api_key,
+            // so headless `grok -p` skips login entirely and routes to the proxy. (verified)
+            const d = path.join(tmpDir, 'grok');
+            fs.mkdirSync(d, { recursive: true });
+            env.GROK_HOME = d;
+          }
         }
       }
 
-      // Collect arguments to forward to the native binary by slicing process.argv
-      // after the <name>. This supports bare `asx e name`, `asx e name "prompt"`, and options.
-      const argv = process.argv;
-      const subIdx = argv.findIndex((v, i) => (v === 'exec' || v === 'e') && argv[i + 1] === name);
-      const forwardStart = subIdx >= 0 ? subIdx + 2 : argv.length;
-      let forwardArgs = argv.slice(forwardStart).filter((a): a is string => typeof a === 'string');
+      // forwardArgs already prepared above (target consumed if present)
+      let forwardArgs = rawAfter;
 
       // Handle --bypass / -b from either options or raw args
       const bypassFromOpts = options?.bypass;
@@ -443,11 +509,40 @@ program
       if (bypass) {
         // Remove the bypass flags from forwarded args
         forwardArgs = forwardArgs.filter(a => a !== '-b' && a !== '--bypass');
-        const bypassFlags = getBypassFlags(provider);
+        const bypassFlags = getBypassFlags(agentProvider);
         forwardArgs = [...bypassFlags, ...forwardArgs];
       }
 
-      console.log(chalk.blue(`[asx exec] ${provider}/${accountName} isolated=${!isCurrent}${bypass ? ' +bypass' : ''}`));
+      // --- ASX Proxy cross-provider handling ---
+      // agent (binary) = specified provider
+      // backend (actual calls + cred) = profile
+      if (isCross) {
+        console.log(chalk.blue(`[asx exec] cross profile=${profileProvider} agent=${agentProvider} (using proxy) (profile=${accountName})`));
+        const proxyMod = await import('./proxy/index.js');
+        const { injectProxyEndpoint } = await import('./proxy/inject.js');
+
+        // Profile provides the backend credential
+        const backendCred = await getSecret(profileProvider, accountName);
+        if (!backendCred) {
+          console.error(chalk.red(`No stored credential for profile ${profileProvider}/${accountName}`));
+          process.exit(1);
+        }
+
+        proxyHandle = await proxyMod.startProxyForExec({
+          // What the launched agent will speak (incoming to proxy)
+          sourceProvider: agentProvider,
+          // What the backend actually is (profile's provider)
+          targetProvider: profileProvider,
+          targetCredential: { apiKey: backendCred, raw: backendCred, type: profileProvider === 'claude' ? 'anthropic' : 'openai' } as any,
+          tmpDir: tmpDir || undefined,
+        });
+
+        if (proxyHandle?.url) {
+          await injectProxyEndpoint(agentProvider, env, proxyHandle.url, tmpDir ?? undefined);
+        }
+      }
+
+      console.log(chalk.blue(`[asx exec] agent=${agentProvider} profile=${profileProvider}/${accountName} isolated=${!!tmpDir}${bypass ? ' +bypass' : ''}${isCross ? ' +proxy' : ''}`));
       const child = spawn(nativeBin, forwardArgs, { env, stdio: 'inherit' });
 
       child.on('exit', (code) => {
@@ -467,5 +562,13 @@ program
       process.exit(1);
     }
   });
+
+// Default command: `asx <account> [provider] [args]` -> `asx e <account> ...`
+// when the first token is a stored account name rather than a subcommand.
+const KNOWN_CMDS = new Set(['list', 'ls', 'load', 'login', 'switch', 'rename', 'remove', 'status', 'exec', 'e', 'help']);
+const first = process.argv[2];
+if (first && !first.startsWith('-') && !KNOWN_CMDS.has(first) && getAccountByName(first)) {
+  process.argv.splice(2, 0, 'e');
+}
 
 program.parse(process.argv);

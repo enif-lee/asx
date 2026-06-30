@@ -68,6 +68,11 @@ asx e ed.codex "refactor this function"
 
 # Run with automatic full-access bypass for the provider
 asx e ed.codex -b "do dangerous things"
+
+# Cross-provider via ASX Proxy (profile provider != target)
+# e.g. run Codex CLI but route through Claude backend (or xai/zai)
+asx e ed.codex claude "refactor using claude"
+asx e ed.claude xai "explain with grok"
 ```
 
 ## 📋 Commands
@@ -80,7 +85,7 @@ asx e ed.codex -b "do dangerous things"
 | `asx rename <from> <to>` | Rename an account (updates vault + metadata + active markers). |
 | `asx switch <provider> <name>` (alias: `s`) | Switch the active credential for a provider. |
 | `asx status [provider]` | Show asx-tracked active account(s). |
-| `asx exec <name> [args...]` (alias: `e`) | Run the native CLI under an **isolated** profile. Creates a temp credential copy (unless it is already the current profile). `-b/--bypass` auto-injects full access flags. Use `--` to cleanly pass options to the native tool. |
+| `asx exec <name> [target?] [args...]` (alias: `e`) | Run the native CLI under an **isolated** profile. When `target` differs from profile provider, requests are routed via local ASX Proxy (input→common→external schema transformers). `-b/--bypass` auto-injects full access flags. |
 | `asx remove [provider] <name>` (alias: `rm`) | Remove a stored account. |
 
 ## 🛠 Supported Providers
