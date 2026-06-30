@@ -10,6 +10,8 @@ import { renderBar } from '../utils/bar.js';
 
 
 
+
+
 async function extractClaudeEmail(credJson: string): Promise<string | undefined> {
   try {
     const parsed = JSON.parse(credJson);
@@ -30,7 +32,7 @@ async function extractClaudeEmail(credJson: string): Promise<string | undefined>
   }
 }
 
-const PROVIDER = 'claude-code';
+const PROVIDER = 'claude';
 
 function readCurrentCredentials(): string | null {
   const plat = getPlatform();
@@ -99,10 +101,10 @@ async function fetchOAuthUsage(token: string): Promise<any | null> {
 export const claudeCodeAdapter: ProviderAdapter = {
   name: PROVIDER,
 
-  async addAccount(accountName: string, label?: string) {
+  async loadCurrent(accountName: string, label?: string) {
     const current = readCurrentCredentials();
     if (!current) {
-      throw new Error('No active Claude Code credentials found. Login with `claude` (or `claude auth login`) first, then run `as add claude-code <name>`.');
+      throw new Error('No active Claude Code credentials found. Login with `claude` (or `claude auth login`) first, then run `asx load claude <name>`.');
     }
     const email = await extractClaudeEmail(current);
     await setSecret(PROVIDER, accountName, current, { email, label: label || accountName });
@@ -117,7 +119,7 @@ export const claudeCodeAdapter: ProviderAdapter = {
 
   async switchTo(accountName: string) {
     const stored = await getSecret(PROVIDER, accountName);
-    if (!stored) throw new Error(`No credentials stored for ${PROVIDER}/${accountName}. Use 'as add' first.`);
+    if (!stored) throw new Error(`No credentials stored for ${PROVIDER}/${accountName}. Use 'asx load' first.`);
     writeActiveCredentials(stored);
     // update lightweight active marker
     const { setActive } = await import('../storage/account-store.js');
@@ -129,10 +131,36 @@ export const claudeCodeAdapter: ProviderAdapter = {
     return raw ? 'active (token present)' : null;
   },
 
+  async getCurrentCredential() {
+    return readCurrentCredentials();
+  },
+
   async getCurrentEmail() {
     const current = readCurrentCredentials();
     if (!current) return undefined;
     return extractClaudeEmail(current);
+  },
+
+  async clearCurrent() {
+    const plat = getPlatform();
+    if (plat === 'darwin') {
+      const account = process.env.USER || 'user';
+      const services = ['Claude Code-credentials', 'Claude Code - credentials', 'claude-code-credentials'];
+      for (const svc of services) {
+        try {
+          execSync(`security delete-generic-password -s ${JSON.stringify(svc)} -a ${JSON.stringify(account)}`, { stdio: 'ignore' });
+        } catch {}
+      }
+      return;
+    }
+    const p = getClaudeCredentialsPath();
+    if (fs.existsSync(p)) {
+      try { fs.unlinkSync(p); } catch {}
+    }
+  },
+
+  getLoginCommand() {
+    return ['claude', 'auth', 'login'];
   },
 
   async getUsage(accountName?: string) {

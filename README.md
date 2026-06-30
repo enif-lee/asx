@@ -7,15 +7,14 @@ Store credentials securely in a single OS Keychain vault and switch between acco
 ## ✨ Features
 
 - **Single Vault**: All accounts (across providers) stored in one secure entry using OS Keychain (`cross-keychain` + fallbacks).
-- **Instant Switch**: `asx cc work` or `asx switch claude-code personal` updates the active credentials so `claude`, `codex`, etc. see the right account immediately.
+- **Instant Switch**: `asx switch claude personal` (or `asx s claude personal`) updates the active credentials so `claude`, `codex`, etc. see the right account immediately.
 - **Beautiful Usage**: Live quota reporting with consistent progress bars (`bar(remaining%) / used%`).
   - Claude Code: accurate 5h / 7d via official OAuth usage API
   - Codex: 5h / 7d windows via ChatGPT backend
   - Grok / xAI / Z.AI: credits + rate limits
-- **Shortcuts**: `cc`, `cx`, `gk`, `cs`
-- **Scoped Execution**: `asx run personal -- claude "explain this"`
-- **Convenient Auto-Add**: `asx add` (or `asx add <provider>`) auto-detects current sessions for main providers (claude-code, codex, grok, cursor). Names are globally unique and optional (defaults to email local part or "personal").
-- **Provider-less Commands**: `asx run <name>`, `asx remove <name>` work without provider.
+- **Isolated Execution (WIP)**: `asx exec` (alias `e`) runs the native tool with a disposable temp credential copy so other terminals are unaffected. When the profile is already current, it runs directly. Temp files are cleaned on exit. (See plan for details)
+- **Convenient Load + Login**: `asx load` snapshots the currently active credential. `asx login <provider>` saves the current session without expiring it, clears only the local state, runs the native login flow, then loads the new account. This enables clean multi-account use without token revocation.
+- **Provider-less Commands**: `asx exec <name>`, `asx remove <name>` work without provider.
 - **Email Tracking**: Stores associated email when adding accounts.
 - **Cross-platform**: Strong support on macOS, works on Linux/Windows.
 
@@ -42,46 +41,46 @@ npm install -g .
 # List accounts
 asx list
 
-# Auto-add current sessions (or specify provider)
-asx add
-asx add claude-code work
-asx add codex personal
+# Load current active sessions
+asx load
+asx load claude-code work
+asx load codex personal
 
-# Switch using shortcuts
-asx cc work           # claude-code
-asx gk personal       # grok
+# Better multi-account flow (saves existing without expiry)
+asx login codex work
+asx login claude-code
 
-# See what's active
-asx status
+# Switch
+asx switch claude personal
+# or the short alias
+asx s codex work
 
-# Check usage (with nice bars)
-asx usage
+# See what's active + usage
+asx list
+asx list -u
 
-# Run a command with a specific account (no provider needed)
-asx run personal -- claude "refactor this function"
+# Run with isolated profile (no impact on other terminals)
+asx e personal "refactor this function" --permission=always-allow
 ```
 
 ## 📋 Commands
 
 | Command                  | Description                              |
 |--------------------------|------------------------------------------|
-| `asx list [provider]`    | List accounts (or for one provider)      |
-| `asx add [provider] [name]` | Auto-add (or for specific provider); name optional |
-| `asx switch <provider> <name>` | Switch active account                 |
-| `asx cc [name]`          | Shortcut: claude-code cycle/switch       |
-| `asx cx [name]`          | Shortcut: codex                          |
-| `asx gk [name]`          | Shortcut: grok                           |
-| `asx cs [name]`          | Shortcut: cursor                         |
-| `asx usage [provider] [name]` | Show live quota with bars (name optional) |
+| `asx list [provider] [-u]` | List accounts (+ usage with -u/--usage) |
+| `asx load [provider] [name]` | Snapshot currently active creds into asx. If no name given, auto-generates as `localpart.provider` (e.g. `e-ed.claude`) |
+| `asx login <provider> [name]` | Save current, clear local, run native login, load new |
+| `asx rename <from> <to>` | Rename an account (updates both vault and metadata) |
+| `asx switch <provider> <name>` (or `s`) | Switch the active credential for a provider |
 | `asx status [provider]`  | Show currently active accounts           |
-| `asx run <name> -- <cmd...>` | Run command with account (provider resolved by unique name) |
+| `asx exec <name> [prompt] [opts]` (alias: e) | Isolated native execution using temp credential (WIP) |
 | `asx remove <name>` | Remove account (provider optional if name unique) |
 
 ## 🛠 Supported Providers
 
 | Provider     | Identifier     | Auth                  | Usage                  |
 |--------------|----------------|-----------------------|------------------------|
-| Claude Code  | `claude-code`  | Keychain (real)       | 5h / 7d bars (accurate)|
+| Claude Code  | `claude`       | Keychain (real)       | 5h / 7d bars (accurate)|
 | Codex        | `codex`        | `~/.codex/auth.json`  | 5h / 7d windows        |
 | Grok / xAI   | `grok`         | API Key               | Credits + rate limits  |
 | Z.AI         | `zai`          | API Key               | Basic key info         |
@@ -92,9 +91,10 @@ More providers can be added easily via the adapter pattern.
 ## 🔐 How It Works
 
 - Everything is stored in **one** secure vault item (`service=asx`, `account=vault`).
-- When you `add`, asx reads the currently active credential from the provider's storage (Keychain for Claude, auth.json for Codex, etc.) and saves it in the vault together with email.
+- `asx load` (or `asx login`) reads the currently active credential from the provider's storage and saves it in the vault (with email).
+- `asx login <provider>` first snapshots the existing session (without calling logout), clears only the *local* credential, then runs the native login flow and loads the new one. This prevents token expiry on the previous account.
 - `switch` writes the chosen credential back to the provider's expected location so the native CLI picks it up.
-- Usage uses the same live mechanisms as [openusage](https://github.com/janekbaraniewski/openusage) where possible (OAuth for Claude, backend APIs for others).
+- Usage (now via `list -u`) uses the same live mechanisms as [openusage](https://github.com/janekbaraniewski/openusage) where possible.
 
 ## 🖥️ Development
 

@@ -28,7 +28,7 @@
   ],
   "author": "",
   "license": "MIT",
-  "description": "Cross-platform multi-account switcher for Claude Code, Codex, Cursor, Grok, Z.AI and more. Credentials in OS keychain, instant switch, usage checks. (asx = as eXtended)",
+  "description": "Cross-platform multi-account switcher for Claude Code, Codex, Cursor, Grok, Z.AI and more. Credentials in OS keychain, non-destructive login, instant switch, usage via list -u. (asx = as eXtended)",
   "dependencies": {
     "@inquirer/prompts": "^8.5.2",
     "chalk": "^5.6.2",

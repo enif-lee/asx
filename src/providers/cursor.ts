@@ -8,7 +8,7 @@ const P = 'cursor';
 export const cursorAdapter: ProviderAdapter = {
   name: P,
 
-  async addAccount(name: string, label?: string) {
+  async loadCurrent(name: string, label?: string) {
     // For Cursor, full credential switching is complex (state.vscdb + safe storage).
     // We store a marker + note. User can use this for tracking.
     // In future we can store snapshot of relevant state.
@@ -37,5 +37,17 @@ export const cursorAdapter: ProviderAdapter = {
       return `Cursor usage for ${accountName}: limited tracking (use Cursor settings or openusage)`;
     }
     return 'Cursor usage: track via Cursor UI or openusage (complex due to internal state.vscdb)';
+  },
+
+  async clearCurrent() {
+    // Cursor is metadata-only; nothing to clear.
+  },
+
+  getLoginCommand() {
+    return null;
+  },
+
+  async getCurrentCredential() {
+    return null;
   },
 };

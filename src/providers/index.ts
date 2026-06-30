@@ -6,12 +6,11 @@ import { cursorAdapter } from './cursor.js';
 
 // Registry
 const adapters: Record<string, ProviderAdapter> = {
-  'claude-code': claudeCodeAdapter,
   'claude': claudeCodeAdapter,
+  'claude-code': claudeCodeAdapter, // alias for backward compat
   'codex': codexAdapter,
   'zai': createKeyAdapter('zai'),
   'grok': createKeyAdapter('grok'),
-  'xai': createKeyAdapter('grok'),
   'cursor': cursorAdapter,
 };
 
@@ -23,5 +22,5 @@ export function getAdapter(name: string): ProviderAdapter {
 }
 
 export function listKnownProviders(): string[] {
-  return Object.keys(adapters);
+  return Object.keys(adapters).filter(k => k !== 'claude-code');
 }

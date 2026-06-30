@@ -146,3 +146,30 @@ export async function getAccountInfo(provider: string, name: string): Promise<{ 
 export async function hasCrossKeychain(): Promise<boolean> {
   return !!crossKeychain?.setPassword;
 }
+
+export async function renameSecret(provider: string, oldName: string, newName: string): Promise<void> {
+  if (!oldName || !newName || oldName === newName) {
+    throw new Error('Invalid rename: old and new names must be different and non-empty');
+  }
+
+  const oldKey = makeKey(provider, oldName);
+  const newKey = makeKey(provider, newName);
+
+  const v = await loadVault();
+  const existing = v.accounts[oldKey];
+  if (!existing) {
+    throw new Error(`No secret found for ${provider}/${oldName}`);
+  }
+
+  if (v.accounts[newKey]) {
+    // Overwrite silently (or could throw, but for rename we allow)
+  }
+
+  v.accounts[newKey] = {
+    ...existing,
+    addedAt: existing.addedAt || new Date().toISOString(),
+  };
+  delete v.accounts[oldKey];
+
+  await saveVault(v);
+}

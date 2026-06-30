@@ -63,31 +63,39 @@ export function addAccount(rec: Omit<AccountRecord, 'addedAt'> & { addedAt?: str
 }
 
 export function removeAccount(provider: string, name: string): boolean {
+  const prov = canonicalProvider(provider);
   const store = loadStore();
   const before = store.accounts.length;
-  store.accounts = store.accounts.filter(a => !(a.provider === provider && a.name === name));
+  store.accounts = store.accounts.filter(a => !(canonicalProvider(a.provider) === prov && a.name === name));
   saveStore(store);
   return store.accounts.length < before;
 }
 
+function canonicalProvider(p: string): string {
+  return p.toLowerCase();
+}
+
 export function getAccount(provider: string, name: string): AccountRecord | undefined {
-  return loadStore().accounts.find(a => a.provider === provider && a.name === name);
+  const prov = canonicalProvider(provider);
+  return loadStore().accounts.find(a => canonicalProvider(a.provider) === prov && a.name === name);
 }
 
 export function setActive(provider: string, name: string): void {
   // lightweight active marker; real active is the injected creds
+  const prov = canonicalProvider(provider);
   const p = path.join(path.dirname(getAsxAccountsPath()), '.active.json');
   ensureDirFor(p);
-  const act = { [provider]: name, updated: new Date().toISOString() };
+  const act = { [prov]: name, updated: new Date().toISOString() };
   fs.writeFileSync(p, JSON.stringify(act, null, 2));
 }
 
 export function getActive(provider: string): string | undefined {
+  const prov = canonicalProvider(provider);
   const p = path.join(path.dirname(getAsxAccountsPath()), '.active.json');
   if (!fs.existsSync(p)) return undefined;
   try {
     const j = JSON.parse(fs.readFileSync(p, 'utf8'));
-    return j[provider];
+    return j[prov];
   } catch { return undefined; }
 }
 
@@ -122,4 +130,47 @@ export function removeAccountByName(name: string): boolean {
   store.accounts = store.accounts.filter(a => a.name !== name);
   saveStore(store);
   return store.accounts.length < before;
+}
+
+export function renameAccount(oldName: string, newName: string): void {
+  if (!oldName || !newName || oldName === newName) {
+    throw new Error('Invalid rename: from and to names must be different and non-empty');
+  }
+
+  const store = loadStore();
+  const idx = store.accounts.findIndex(a => a.name === oldName);
+  if (idx === -1) {
+    throw new Error(`Account "${oldName}" not found`);
+  }
+
+  const acct = store.accounts[idx];
+
+  // Check global name uniqueness (different provider)
+  const crossConflict = store.accounts.find(a => a.name === newName && a.provider !== acct.provider);
+  if (crossConflict) {
+    throw new Error(`Name "${newName}" is already used by provider "${crossConflict.provider}". Account names must be unique.`);
+  }
+
+  // Update the name
+  store.accounts[idx].name = newName;
+
+  saveStore(store);
+
+  // Update active markers if this name was active
+  const activePath = path.join(path.dirname(getAsxAccountsPath()), '.active.json');
+  if (fs.existsSync(activePath)) {
+    try {
+      const act = JSON.parse(fs.readFileSync(activePath, 'utf8'));
+      let changed = false;
+      for (const prov of Object.keys(act)) {
+        if (act[prov] === oldName) {
+          act[prov] = newName;
+          changed = true;
+        }
+      }
+      if (changed) {
+        fs.writeFileSync(activePath, JSON.stringify(act, null, 2));
+      }
+    } catch {}
+  }
 }

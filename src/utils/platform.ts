@@ -94,6 +94,7 @@ export function getCursorStateDbPath(): string {
 
 // === Grok (local ~/.grok) ===
 export function getGrokHome(): string {
+  if (process.env.GROK_HOME) return expandHome(process.env.GROK_HOME);
   return getHomeDotDir('grok');
 }
 

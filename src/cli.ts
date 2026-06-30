@@ -1,45 +1,148 @@
 #!/usr/bin/env node
 import { Command } from 'commander';
 import chalk from 'chalk';
+import { spawn, execSync } from 'node:child_process';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
 import { getAdapter, listKnownProviders } from './providers/index.js';
-import { listAccounts, getActive, getNextAccount } from './storage/account-store.js';
+import { listAccounts, getActive, getAccountByName } from './storage/account-store.js';
+import { getSecret } from './storage/secure-store.js';
 
+function getProviderShortName(provider: string): string {
+  const p = provider.toLowerCase();
+  if (p === 'claude' || p === 'claude-code') return 'claude';
+  if (p === 'codex') return 'codex';
+  if (p === 'grok') return 'grok';
+  if (p === 'cursor') return 'cursor';
+  if (p === 'zai') return 'zai';
+  // fallback
+  return p.replace(/-code$/, '').split('-')[0];
+}
+
+function deriveAccountName(email: string | undefined, provider: string): string {
+  const local = email ? email.split('@')[0] : 'personal';
+  const short = getProviderShortName(provider);
+  return `${local}.${short}`;
+}
 
 const program = new Command();
 
 program
   .name('asx')
-  .description('Multi-account LLM provider switcher (claude-code, codex, z-ai, grok, cursor). Credentials via OS keychain. (renamed from "as" to avoid conflict with LLVM as)')
+  .description('Multi-account LLM provider switcher (claude, codex, zai, grok, cursor). Credentials via OS keychain. (renamed from "as" to avoid conflict with LLVM as)')
   .version('0.1.0');
 
 program
   .command('list [provider]')
   .alias('ls')
-  .description('List accounts per provider (or all)')
-  .action(async (provider?: string) => {
-    const provs = provider ? [provider] : listKnownProviders();
+  .description('List accounts per provider (or all). Use -u/--usage to show live quota. Use -d/--debug to show stored credentials.')
+  .option('-u, --usage', 'Show usage/quota bars for each listed account')
+  .option('-d, --debug', 'Show stored credentials (debug mode)')
+  .action(async (provider?: string, opts: { usage?: boolean; debug?: boolean } = {}) => {
+    let provs: string[] = [];
+    let singleName: string | undefined;
+
+    if (provider) {
+      try {
+        getAdapter(provider);
+        provs = [provider];
+      } catch {
+        // Maybe user passed a global account name
+        try {
+          const acct = getAccountByName(provider);
+          if (acct) {
+            provs = [acct.provider];
+            singleName = provider;
+          } else {
+            console.log(chalk.red(`Unknown provider or name: ${provider}`));
+            return;
+          }
+        } catch {
+          console.log(chalk.red(`Unknown provider: ${provider}`));
+          return;
+        }
+      }
+    } else {
+      provs = listKnownProviders();
+    }
+
     for (const p of provs) {
-      const accts = listAccounts(p);
+      const accts = singleName
+        ? listAccounts(p).filter(a => a.name === singleName)
+        : listAccounts(p);
       const active = getActive(p);
       console.log(chalk.bold(`${p}:`));
       if (accts.length === 0) {
-        console.log('  (none)');
-      } else {
-        for (const a of accts) {
-          const star = a.name === active ? chalk.green(' *') : '  ';
-          const emailPart = a.email ? chalk.gray(` <${a.email}>`) : '';
-          const labelPart = a.label && a.label !== a.name ? ` (${a.label})` : '';
-          console.log(`${star} ${a.name}${emailPart}${labelPart}`);
+        if (provider && !singleName) console.log('  (none)');
+        continue;
+      }
+      const adapter = getAdapter(p);
+
+      // Detect which (if any) of our stored accounts matches the *actual* credential
+      // currently loaded in the system (keychain / ~/.codex/auth.json / ~/.grok/auth.json etc.)
+      let liveCredential: string | null = null;
+      try {
+        liveCredential = await (adapter.getCurrentCredential?.() ?? Promise.resolve(null));
+      } catch {}
+
+      let getSecretFn: ((provider: string, name: string) => Promise<string | null>) | null = null;
+      if (liveCredential) {
+        try {
+          const mod = await import('./storage/secure-store.js');
+          getSecretFn = mod.getSecret;
+        } catch {}
+      }
+
+      for (const a of accts) {
+        const star = a.name === active ? chalk.green(' *') : '  ';
+        const emailPart = a.email ? chalk.gray(` <${a.email}>`) : '';
+        const labelPart = a.label && a.label !== a.name ? ` (${a.label})` : '';
+
+        let systemMark = '';
+        if (liveCredential && getSecretFn) {
+          try {
+            const stored = await getSecretFn(p, a.name);
+            if (stored === liveCredential) {
+              systemMark = chalk.cyan(' (current in system)');
+            }
+          } catch {}
+        }
+
+        console.log(`${star} ${a.name}${emailPart}${labelPart}${systemMark}`);
+
+        if (opts.debug) {
+          try {
+            const { getSecret } = await import('./storage/secure-store.js');
+            const cred = await getSecret(p, a.name);
+            if (cred) {
+              console.log(`    credential: ${cred}`);
+            } else {
+              console.log(`    credential: (none)`);
+            }
+          } catch (e: any) {
+            console.log(`    credential: error - ${e.message || e}`);
+          }
+        }
+
+        if (opts.usage) {
+          try {
+            const usage = await (adapter.getUsage?.(a.name) ?? Promise.resolve(''));
+            const lines = String(usage).trim().split('\n');
+            for (const line of lines) {
+              if (line) console.log(`    ${line}`);
+            }
+          } catch {}
         }
       }
     }
   });
 
 program
-  .command('add [provider] [name]')
-  .description('Snapshot current active creds. If no provider given, auto-detects and adds for main providers (claude-code, codex, grok, cursor). Name is optional (defaults to email localpart or "personal").')
+  .command('load [provider] [name]')
+  .description('Load (snapshot) currently active credential(s) from provider into asx. If no provider given, auto-detects main providers.')
   .action(async (provider?: string, name?: string) => {
-    const mainProviders = ['claude-code', 'codex', 'grok', 'cursor'];
+    const mainProviders = ['claude', 'codex', 'grok', 'cursor'];
 
     const targets: Array<{provider: string, explicitName?: string}> = [];
     if (!provider) {
@@ -63,29 +166,18 @@ program
         let email: string | undefined;
 
         if (!finalName && adapter.getCurrentEmail) {
-          email = await adapter.getCurrentEmail();
-          if (email) {
-            // Use email local part for better default (helps uniqueness)
-            finalName = email.split('@')[0] || 'personal';
-          }
-        }
-        if (!finalName) finalName = 'personal';
-
-        // For auto-add, try to pick a unique name to avoid conflicts on common names like "personal"
-        if (!explicitName && !provider) {
-          const existing = listAccounts().filter(a => a.name === finalName);
-          if (existing.length > 0) {
-            const short = p.split('-')[0];
-            finalName = `${finalName}-${short}`;
-          }
+          email = await adapter.getCurrentEmail().catch(() => undefined);
         }
 
-        await adapter.addAccount(finalName);
-        console.log(chalk.green(`Added ${p}/${finalName}${email ? ` (${email})` : ''}`));
+        if (!finalName) {
+          finalName = deriveAccountName(email, p);
+        }
+
+        await adapter.loadCurrent(finalName);
+        console.log(chalk.green(`Loaded ${p}/${finalName}${email ? ` (${email})` : ''}`));
       } catch (e: any) {
         const msg = e.message || String(e);
         if (!provider && (msg.includes('No active') || msg.includes('No ') || msg.includes('not found') || msg.includes('found') || msg.includes('already used'))) {
-          // auto mode: silently skip
           continue;
         }
         console.error(chalk.red(`Failed for ${p}: ${msg}`));
@@ -95,7 +187,84 @@ program
   });
 
 program
+  .command('login <provider> [name]')
+  .description('Save current session (non-destructively), clear local provider session, launch native login flow, then load the new session.')
+  .action(async (provider: string, name?: string) => {
+    const p = provider.toLowerCase();
+
+    let adapter: any;
+    try {
+      adapter = getAdapter(p);
+    } catch (e: any) {
+      console.error(chalk.red(e.message || e));
+      return;
+    }
+
+    const loginCmd = typeof adapter.getLoginCommand === 'function' ? adapter.getLoginCommand() : null;
+    if (!loginCmd || loginCmd.length === 0) {
+      console.log(chalk.yellow(`Login flow is not supported for provider '${p}'.`));
+      console.log(chalk.gray(`For API-key providers (grok, zai, ...) use environment variables or run the native tool then 'asx load ${p} <name>'.`));
+      return;
+    }
+
+    // 1. Save existing session (the key non-destructive step)
+    try {
+      let prevName: string;
+      let prevEmail: string | undefined;
+      if (adapter.getCurrentEmail) {
+        prevEmail = await adapter.getCurrentEmail().catch(() => undefined);
+      }
+      prevName = deriveAccountName(prevEmail, p);
+      // Best-effort: ignore "no current" errors
+      await adapter.loadCurrent(prevName).catch((e: any) => {
+        const m = String(e?.message || e);
+        if (!/No active|No .*found|not found/i.test(m)) throw e;
+      });
+    } catch (e: any) {
+      // non-fatal for login flow
+    }
+
+    // 2. Clear only the local session
+    if (typeof adapter.clearCurrent === 'function') {
+      try { await adapter.clearCurrent(); } catch {}
+    }
+
+    // 3. Launch native login (interactive)
+    const [cmd, ...args] = loginCmd;
+    console.log(chalk.cyan(`Launching native login: ${loginCmd.join(' ')}`));
+    console.log(chalk.gray('Complete the login in the opened browser/terminal...'));
+
+    const exitCode = await new Promise<number>((resolve, reject) => {
+      const child = spawn(cmd, args, { stdio: 'inherit' });
+      child.on('error', (err) => reject(err));
+      child.on('close', (code) => resolve(code ?? 1));
+    });
+
+    if (exitCode !== 0) {
+      console.log(chalk.yellow(`Native login exited with code ${exitCode}.`));
+    }
+
+    // 4. Load the newly logged-in session
+    try {
+      let targetName = name;
+      let newEmail: string | undefined;
+      if (!targetName && adapter.getCurrentEmail) {
+        newEmail = await adapter.getCurrentEmail().catch(() => undefined);
+      }
+      if (!targetName) {
+        targetName = deriveAccountName(newEmail, p);
+      }
+
+      await adapter.loadCurrent(targetName);
+      console.log(chalk.green(`Loaded ${p}/${targetName} after login.`));
+    } catch (e: any) {
+      console.error(chalk.red(`Failed to load new session: ${e.message || e}`));
+    }
+  });
+
+program
   .command('switch <provider> <name>')
+  .alias('s')
   .description('Switch the active credential for provider to the named account')
   .action(async (provider: string, name: string) => {
     const adapter = getAdapter(provider);
@@ -105,6 +274,32 @@ program
     } catch (e: any) {
       console.error(chalk.red(e.message || e));
       process.exit(1);
+    }
+  });
+
+program
+  .command('rename <from> <to>')
+  .description('Rename an existing account from one name to another')
+  .action(async (fromName: string, toName: string) => {
+    try {
+      const acct = getAccountByName(fromName);
+      if (!acct) {
+        console.error(chalk.red(`Account "${fromName}" not found`));
+        return;
+      }
+      const prov = acct.provider;
+
+      // Rename in secure vault first
+      const { renameSecret } = await import('./storage/secure-store.js');
+      await renameSecret(prov, fromName, toName);
+
+      // Then rename in metadata store (also updates active markers)
+      const { renameAccount } = await import('./storage/account-store.js');
+      renameAccount(fromName, toName);
+
+      console.log(chalk.green(`Renamed ${fromName} → ${toName} (${prov})`));
+    } catch (e: any) {
+      console.error(chalk.red(e.message || e));
     }
   });
 
@@ -143,91 +338,6 @@ program
   });
 
 program
-  .command('usage [provider] [name]')
-  .description('Show per-account usage / quota (best effort, see openusage for richer data). Supports usage <name> for unique names.')
-  .action(async (provider?: string, name?: string) => {
-    let providersToShow: string[] = [];
-    let specificName: string | undefined = name;
-
-    if (provider) {
-      try {
-        getAdapter(provider);
-        providersToShow = [provider];
-      } catch (e) {
-        // provider arg might actually be a global name
-        const { getAccountByName } = await import('./storage/account-store.js');
-        try {
-          const acct = getAccountByName(provider);
-          if (acct) {
-            providersToShow = [acct.provider];
-            specificName = provider;
-          } else {
-            console.log(chalk.red(`Unknown provider or name: ${provider}`));
-            return;
-          }
-        } catch {
-          console.log(chalk.red(`Unknown provider: ${provider}`));
-          return;
-        }
-      }
-    } else if (name) {
-      // usage <name> ? but signature has [provider][name], rare
-      providersToShow = listKnownProviders();
-      specificName = name;
-    } else {
-      providersToShow = listKnownProviders();
-    }
-
-    let showedAnything = false;
-
-    for (const p of providersToShow) {
-      const accts = listAccounts(p);
-      if (accts.length === 0) {
-        if (provider) {
-          console.log(chalk.yellow(`No accounts for ${p}.`));
-        }
-        continue;
-      }
-
-      showedAnything = true;
-      const adapter = getAdapter(p);
-
-      console.log(chalk.bold(`${p}:`));
-
-      const specific = specificName;
-      if (specific) {
-        // specific account requested (may be global name)
-        const out = await (adapter.getUsage?.(specific) ?? Promise.resolve('no usage impl yet'));
-        const activeMark = getActive(p) === specific ? chalk.green(' *') : '  ';
-        const lines = String(out).split('\n');
-        console.log(`${activeMark} ${specific}: ${lines[0]}`);
-        for (let i = 1; i < lines.length; i++) {
-          console.log(`    ${lines[i]}`);
-        }
-      } else {
-        // show all accounts for this provider
-        for (const a of accts) {
-          const out = await (adapter.getUsage?.(a.name) ?? Promise.resolve('no usage impl yet'));
-          const active = getActive(p) === a.name ? chalk.green(' *') : '  ';
-          const lines = String(out).split('\n');
-          console.log(`${active} ${a.name}: ${lines[0]}`);
-          for (let i = 1; i < lines.length; i++) {
-            console.log(`    ${lines[i]}`);
-          }
-        }
-      }
-    }
-
-    if (!showedAnything) {
-      if (provider) {
-        // already handled above if no accounts
-      } else {
-        console.log('No accounts registered. Use `asx add <provider> [name]` first.');
-      }
-    }
-  });
-
-program
   .command('status [provider]')
   .description('Show current active account(s)')
   .action(async (provider?: string) => {
@@ -239,91 +349,97 @@ program
   });
 
 program
-  .command('run <spec> [cmd...]')
-  .description('Run a command with a specific account. Primary: "run <name> -- <cmd>" (resolves provider from unique name). Legacy also supported: "run <provider> <name> -- <cmd>"')
-  .action(async (spec: string, cmdParts: string[]) => {
-    let provider: string;
-    let name: string;
-    const commandParts = cmdParts || [];
-
-    if (spec.includes('/')) {
-      [provider, name] = spec.split('/', 2);
-    } else if (listKnownProviders().includes(spec) && commandParts.length > 0) {
-      // legacy without -- or with
-      provider = spec;
-      name = commandParts.shift()!;
-    } else {
-      // new provider-less by unique name
-      name = spec;
-      const { getAccountByName } = await import('./storage/account-store.js');
-      const acct = getAccountByName(name);
-      if (!acct) {
-        console.error(chalk.red(`No account found with name "${name}"`));
-        process.exit(1);
-      }
-      provider = acct.provider;
+  .command('exec <name>')
+  .alias('e')
+  .description('Run the native CLI (claude/codex/grok/...) under an isolated profile.\nExamples: asx e ed.codex | asx e ed.codex "hello" | asx e ed.codex -- --help')
+  .allowUnknownOption(true)
+  .allowExcessArguments(true)
+  .action(async (name: string) => {
+    const { getAccountByName } = await import('./storage/account-store.js');
+    const acct = getAccountByName(name);
+    if (!acct) {
+      console.error(chalk.red(`No account found with name "${name}"`));
+      process.exit(1);
     }
 
-    const adapter = getAdapter(provider);
+    const provider = acct.provider;
+    const accountName = acct.name;
+    const isCurrent = getActive(provider) === accountName;
+
+    const nativeBin = provider.includes('claude') ? 'claude'
+      : provider === 'codex' ? 'codex'
+      : provider === 'grok' ? 'grok'
+      : null;
+
+    if (!nativeBin) {
+      console.error(chalk.red(`Exec is not supported for provider '${provider}'.`));
+      process.exit(1);
+    }
+
+    let env = { ...process.env };
+    let tmpDir: string | null = null;
+
+    const cleanup = () => {
+      if (tmpDir && fs.existsSync(tmpDir)) {
+        try { fs.rmSync(tmpDir, { recursive: true, force: true }); } catch {}
+      }
+    };
+
     try {
-      await adapter.switchTo(name); // temp global for the child
-      const fullCmd = commandParts.length ? commandParts.join(' ') : 'echo "switched (no command given)"';
-      console.log(chalk.blue(`Running under ${provider}/${name}: ${fullCmd}`));
-      execSync(fullCmd, { stdio: 'inherit', shell: true } as any);
+      if (!isCurrent) {
+        const cred = await getSecret(provider, accountName);
+        if (!cred) {
+          console.error(chalk.red(`No stored credential for ${provider}/${accountName}`));
+          process.exit(1);
+        }
+
+        tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), `asx-${accountName.replace(/[^a-zA-Z0-9_-]/g, '_')}-`));
+        fs.chmodSync(tmpDir, 0o700);
+
+        if (provider === 'codex') {
+          const d = path.join(tmpDir, 'codex');
+          fs.mkdirSync(d, { recursive: true });
+          fs.writeFileSync(path.join(d, 'auth.json'), cred, { mode: 0o600 });
+          env.CODEX_HOME = d;
+        } else if (provider.includes('claude')) {
+          const d = path.join(tmpDir, 'claude');
+          fs.mkdirSync(d, { recursive: true });
+          fs.writeFileSync(path.join(d, '.credentials.json'), cred, { mode: 0o600 });
+          env.CLAUDE_CONFIG_DIR = d;
+        } else if (provider === 'grok') {
+          const d = path.join(tmpDir, 'grok');
+          fs.mkdirSync(d, { recursive: true });
+          fs.writeFileSync(path.join(d, 'auth.json'), cred, { mode: 0o600 });
+          env.GROK_HOME = d;
+        }
+      }
+
+      // Collect arguments to forward to the native binary by slicing process.argv
+      // after the <name>. This supports bare `asx e name`, `asx e name "prompt"`, and options.
+      const argv = process.argv;
+      const subIdx = argv.findIndex((v, i) => (v === 'exec' || v === 'e') && argv[i + 1] === name);
+      const forwardStart = subIdx >= 0 ? subIdx + 2 : argv.length;
+      const forwardArgs = argv.slice(forwardStart).filter((a): a is string => typeof a === 'string');
+
+      console.log(chalk.blue(`[asx exec] ${provider}/${accountName} isolated=${!isCurrent}`));
+      const child = spawn(nativeBin, forwardArgs, { env, stdio: 'inherit' });
+
+      child.on('exit', (code) => {
+        cleanup();
+        process.exit(code ?? 0);
+      });
+
+      child.on('error', (err) => {
+        cleanup();
+        console.error(chalk.red(err.message || err));
+        process.exit(1);
+      });
+
     } catch (e: any) {
+      cleanup();
       console.error(chalk.red(e.message || e));
+      process.exit(1);
     }
   });
-
-// Shortcut commands for quick switching + cycling
-// cc = claude-code, cx = codex, gk = grok, cs = cursor
-const shortcutMap: Record<string, string> = {
-  cc: 'claude-code',
-  cx: 'codex',
-  gk: 'grok',
-  cs: 'cursor',
-};
-
-Object.entries(shortcutMap).forEach(([short, provider]) => {
-  program
-    .command(short)
-    .argument('[name]', 'account name (if omitted, cycles to next)')
-    .description(`Quick switch for ${provider} (cycle if no name)`)
-    .action(async (name?: string) => {
-      // Try to get adapter; cursor may not be fully implemented yet
-      let adapter: any;
-      try {
-        adapter = getAdapter(provider);
-      } catch {
-        console.log(chalk.yellow(`Provider '${provider}' not fully registered yet. Using metadata only.`));
-      }
-
-      try {
-        let target = name;
-        if (!target) {
-          target = getNextAccount(provider) || undefined;
-          if (!target) {
-            console.log(chalk.yellow(`No accounts registered for ${provider}. Use 'asx add ${provider} <name>' first.`));
-            return;
-          }
-          console.log(chalk.cyan(`Cycling ${provider} → ${target}`));
-        }
-
-        if (adapter) {
-          await adapter.switchTo(target);
-        } else {
-          // Fallback: just update active marker (for cursor etc.)
-          const { setActive } = await import('./storage/account-store.js');
-          setActive(provider, target);
-        }
-        console.log(chalk.green(`Switched ${provider} → ${target}`));
-      } catch (e: any) {
-        console.error(chalk.red(e.message || e));
-        process.exit(1);
-      }
-    });
-});
-
-import { execSync } from 'node:child_process';
 
 program.parse(process.argv);
