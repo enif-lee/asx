@@ -348,13 +348,27 @@ program
     }
   });
 
+function getBypassFlags(provider: string): string[] {
+  if (provider === 'claude' || provider === 'claude-code') {
+    return ['--dangerously-skip-permissions'];
+  }
+  if (provider === 'codex') {
+    return ['--dangerously-bypass-approvals-and-sandbox', '--dangerously-bypass-hook-trust'];
+  }
+  if (provider === 'grok') {
+    return ['--dangerously-skip-permissions'];
+  }
+  return [];
+}
+
 program
   .command('exec <name>')
   .alias('e')
-  .description('Run the native CLI (claude/codex/grok/...) under an isolated profile.\nExamples: asx e ed.codex | asx e ed.codex "hello" | asx e ed.codex -- --help')
+  .description('Run the native CLI (claude/codex/grok/...) under an isolated profile.\nUse -b/--bypass to auto-inject full permission flags per provider.\nExamples:\n  asx e ed.codex\n  asx e ed.codex "hello"\n  asx e ed.codex -b "do something dangerous"')
+  .option('-b, --bypass', 'Automatically inject full-access permission bypass flags for the target provider')
   .allowUnknownOption(true)
   .allowExcessArguments(true)
-  .action(async (name: string) => {
+  .action(async (name: string, options: { bypass?: boolean }) => {
     const { getAccountByName } = await import('./storage/account-store.js');
     const acct = getAccountByName(name);
     if (!acct) {
@@ -419,9 +433,21 @@ program
       const argv = process.argv;
       const subIdx = argv.findIndex((v, i) => (v === 'exec' || v === 'e') && argv[i + 1] === name);
       const forwardStart = subIdx >= 0 ? subIdx + 2 : argv.length;
-      const forwardArgs = argv.slice(forwardStart).filter((a): a is string => typeof a === 'string');
+      let forwardArgs = argv.slice(forwardStart).filter((a): a is string => typeof a === 'string');
 
-      console.log(chalk.blue(`[asx exec] ${provider}/${accountName} isolated=${!isCurrent}`));
+      // Handle --bypass / -b from either options or raw args
+      const bypassFromOpts = options?.bypass;
+      const bypassFromArgs = forwardArgs.includes('-b') || forwardArgs.includes('--bypass');
+      const bypass = bypassFromOpts || bypassFromArgs;
+
+      if (bypass) {
+        // Remove the bypass flags from forwarded args
+        forwardArgs = forwardArgs.filter(a => a !== '-b' && a !== '--bypass');
+        const bypassFlags = getBypassFlags(provider);
+        forwardArgs = [...bypassFlags, ...forwardArgs];
+      }
+
+      console.log(chalk.blue(`[asx exec] ${provider}/${accountName} isolated=${!isCurrent}${bypass ? ' +bypass' : ''}`));
       const child = spawn(nativeBin, forwardArgs, { env, stdio: 'inherit' });
 
       child.on('exit', (code) => {
