@@ -8,11 +8,9 @@
 //   SSE: response.output_text.delta {delta}, response.output_text.done {text}, response.completed.
 import { randomUUID } from 'node:crypto';
 import type { BackendAdapter, CommonRequest, CommonEvent, CommonResponse } from '../types.js';
+import { backendModel } from '../models.js';
 
 const CODEX_URL = 'https://chatgpt.com/backend-api/codex/responses';
-// ponytail: model is account-bound; gpt-5.5 is the verified default for this ChatGPT plan.
-// Override with ASX_CODEX_MODEL if the account exposes a different one.
-const DEFAULT_MODEL = process.env.ASX_CODEX_MODEL || 'gpt-5.5';
 
 function extractAuth(cred: string): { token: string; account: string } {
   const d = JSON.parse(cred);
@@ -29,7 +27,7 @@ export const codexBackend: BackendAdapter = {
       content: [{ type: m.role === 'assistant' ? 'output_text' : 'input_text', text: m.content }],
     }));
     const body = {
-      model: DEFAULT_MODEL,
+      model: backendModel('codex'),
       instructions: req.system || 'You are a helpful assistant.',
       input,
       stream: true,           // codex backend only streams; server accumulates if agent wanted non-stream

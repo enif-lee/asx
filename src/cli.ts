@@ -547,7 +547,7 @@ program
         });
 
         if (proxyHandle?.url) {
-          await injectProxyEndpoint(agentProvider, env, proxyHandle.url, tmpDir ?? undefined);
+          await injectProxyEndpoint(agentProvider, env, proxyHandle.url, tmpDir ?? undefined, profileProvider);
         }
       }
 
