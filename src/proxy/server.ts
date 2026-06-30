@@ -2,6 +2,7 @@ import http from 'node:http';
 import { randomUUID } from 'node:crypto';
 import type { ProxyHandle, ProxyStartOptions, CommonEvent, StreamCtx } from './types.js';
 import { pickAgent, pickBackend } from './adapters/index.js';
+import { dlog } from '../utils/log.js';
 
 // Short-lived in-process proxy for one exec session.
 //   agent wire ─[agent.parseRequest]─▶ COMMON ─[backend.buildRequest]─▶ upstream
@@ -20,7 +21,7 @@ export async function startProxy(options: ProxyStartOptions): Promise<ProxyHandl
     const reqId = randomUUID().slice(0, 8);
     const urlPath = (req.url || '').split('?')[0];
     const isInference = req.method === 'POST' && /\/(v1\/)?(responses|messages|chat\/completions|completions)/.test(urlPath);
-    console.log(`[asx-proxy] ${req.method} ${urlPath} (agent=${agentProvider}->backend=${backendProvider}, id=${reqId}${isInference ? ', inference' : ''})`);
+    dlog(`[asx-proxy] ${req.method} ${urlPath} (agent=${agentProvider}->backend=${backendProvider}, id=${reqId}${isInference ? ', inference' : ''})`);
 
     try {
       // Non-inference startup checkpoints (auth/status/billing). Real auth is the backend cred.
@@ -36,15 +37,15 @@ export async function startProxy(options: ProxyStartOptions): Promise<ProxyHandl
       let body: any; try { body = rawBody ? JSON.parse(rawBody) : {}; } catch { body = {}; }
 
       const common = agent.parseRequest(urlPath, body);
-      console.log(`[asx-proxy] req model=${common.model} msgs=${common.messages.length} stream=${common.stream} prompt~="${(common.messages.at(-1)?.content || '').slice(0, 50)}"`);
+      dlog(`[asx-proxy] req model=${common.model} msgs=${common.messages.length} stream=${common.stream} prompt~="${(common.messages.at(-1)?.content || '').slice(0, 50)}"`);
 
       const up = backend.buildRequest(common, cred);
       const upstreamRes = await fetch(up.url, { method: 'POST', headers: up.headers, body: up.body });
-      console.log(`[asx-proxy] upstream ${up.url} -> ${upstreamRes.status}`);
+      dlog(`[asx-proxy] upstream ${up.url} -> ${upstreamRes.status}`);
 
       if (!upstreamRes.ok) {
         const errText = await upstreamRes.text().catch(() => '');
-        console.error(`[asx-proxy] upstream error ${upstreamRes.status}: ${errText.slice(0, 300)}`);
+        dlog(`[asx-proxy] upstream error ${upstreamRes.status}: ${errText.slice(0, 300)}`);
       }
 
       const ctx: StreamCtx = { id: 'chatcmpl-asx-' + reqId, created: Math.floor(Date.now() / 1000), model: common.model, first: true };
@@ -103,7 +104,7 @@ export async function startProxy(options: ProxyStartOptions): Promise<ProxyHandl
         res.end(JSON.stringify(agent.formatResponse({ text, finishReason }, common)));
       }
     } catch (err: any) {
-      console.error('[asx-proxy] error:', err?.message || err);
+      dlog('[asx-proxy] error:', err?.message || err);
       if (!res.headersSent) res.writeHead(500, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({ error: { message: err?.message || 'proxy error' } }));
     }
@@ -111,7 +112,7 @@ export async function startProxy(options: ProxyStartOptions): Promise<ProxyHandl
 
   await new Promise<void>((resolve) => server.listen(port, '127.0.0.1', resolve));
   const url = `http://127.0.0.1:${port}`;
-  console.log(`[asx-proxy] listening on ${url} (agent=${agentProvider} backend=${backendProvider})`);
+  dlog(`[asx-proxy] listening on ${url} (agent=${agentProvider} backend=${backendProvider})`);
   return { url, port, stop: () => { try { server.close(); } catch {} } };
 }
 

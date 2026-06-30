@@ -8,6 +8,7 @@ import path from 'node:path';
 import { getAdapter, listKnownProviders } from './providers/index.js';
 import { listAccounts, getActive, getAccountByName } from './storage/account-store.js';
 import { getSecret } from './storage/secure-store.js';
+import { dlog } from './utils/log.js';
 
 function getProviderShortName(provider: string): string {
   const p = provider.toLowerCase();
@@ -366,9 +367,10 @@ program
   .alias('e')
   .description('Run the native CLI (claude/codex/grok/...) under an isolated profile.\nOptional <target> after name routes via ASX Proxy when providers differ (e.g. asx e ed.codex claude).\nUse -b/--bypass to auto-inject full permission flags per provider.\nExamples:\n  asx e ed.codex\n  asx e ed.codex claude "hello"\n  asx e ed.codex -b "do something dangerous"')
   .option('-b, --bypass', 'Automatically inject full-access permission bypass flags for the target provider')
+  .option('-d, --debug', 'Show ASX proxy/exec debug logs (to stderr). Off by default.')
   .allowUnknownOption(true)
   .allowExcessArguments(true)
-  .action(async (name: string, options: { bypass?: boolean }) => {
+  .action(async (name: string, options: { bypass?: boolean; debug?: boolean }) => {
     const { getAccountByName } = await import('./storage/account-store.js');
     const acct = getAccountByName(name);
     if (!acct) {
@@ -501,6 +503,13 @@ program
       // forwardArgs already prepared above (target consumed if present)
       let forwardArgs = rawAfter;
 
+      // Handle --debug / -d (ASX-level): enable proxy/exec logs, strip from forwarded args.
+      const debug = options?.debug || forwardArgs.includes('-d') || forwardArgs.includes('--debug');
+      if (debug) {
+        process.env.ASX_DEBUG = '1';
+        forwardArgs = forwardArgs.filter(a => a !== '-d' && a !== '--debug');
+      }
+
       // Handle --bypass / -b from either options or raw args
       const bypassFromOpts = options?.bypass;
       const bypassFromArgs = forwardArgs.includes('-b') || forwardArgs.includes('--bypass');
@@ -517,7 +526,7 @@ program
       // agent (binary) = specified provider
       // backend (actual calls + cred) = profile
       if (isCross) {
-        console.log(chalk.blue(`[asx exec] cross profile=${profileProvider} agent=${agentProvider} (using proxy) (profile=${accountName})`));
+        dlog(chalk.blue(`[asx exec] cross profile=${profileProvider} agent=${agentProvider} (using proxy) (profile=${accountName})`));
         const proxyMod = await import('./proxy/index.js');
         const { injectProxyEndpoint } = await import('./proxy/inject.js');
 
@@ -542,7 +551,7 @@ program
         }
       }
 
-      console.log(chalk.blue(`[asx exec] agent=${agentProvider} profile=${profileProvider}/${accountName} isolated=${!!tmpDir}${bypass ? ' +bypass' : ''}${isCross ? ' +proxy' : ''}`));
+      dlog(chalk.blue(`[asx exec] agent=${agentProvider} profile=${profileProvider}/${accountName} isolated=${!!tmpDir}${bypass ? ' +bypass' : ''}${isCross ? ' +proxy' : ''}`));
       const child = spawn(nativeBin, forwardArgs, { env, stdio: 'inherit' });
 
       child.on('exit', (code) => {

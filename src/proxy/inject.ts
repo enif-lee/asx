@@ -1,6 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import type { Platform } from '../utils/platform.js';
+import { dlog } from '../utils/log.js';
 
 // Inject proxy endpoint into the isolated temp environment so the *native binary*
 // (codex or claude) talks to our local ASX proxy instead of real provider.
@@ -61,10 +62,10 @@ requires_openai_auth = true
   try {
     fs.writeFileSync(cfgPath, cleanConfig, { mode: 0o600 });
 
-    console.log(`[asx-proxy] Injected Codex config at ${cfgPath}`);
-    console.log(`[asx-proxy] base_url=${base}/v1  (model_provider=${providerId})`);
+    dlog(`[asx-proxy] Injected Codex config at ${cfgPath}`);
+    dlog(`[asx-proxy] base_url=${base}/v1  (model_provider=${providerId})`);
   } catch (e: any) {
-    console.warn('[asx proxy] failed to inject codex config.toml:', e?.message || e);
+    dlog('[asx proxy] failed to inject codex config.toml:', e?.message || e);
   }
 }
 
@@ -120,9 +121,9 @@ context_window = 200000
   const cfgPath = path.join(grokHome, 'config.toml');
   try {
     fs.writeFileSync(cfgPath, configContent, { mode: 0o600 });
-    console.log(`[asx-proxy] Injected Grok config at ${cfgPath}`);
-    console.log(`[asx-proxy] base_url=${base} for model ${providerId}`);
+    dlog(`[asx-proxy] Injected Grok config at ${cfgPath}`);
+    dlog(`[asx-proxy] base_url=${base} for model ${providerId}`);
   } catch (e: any) {
-    console.warn('[asx proxy] failed to inject grok config.toml:', e?.message || e);
+    dlog('[asx proxy] failed to inject grok config.toml:', e?.message || e);
   }
 }
