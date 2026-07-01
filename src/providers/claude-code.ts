@@ -111,7 +111,7 @@ export const claudeCodeAdapter: ProviderAdapter = {
       throw new Error('No active Claude Code credentials found. Login with `claude` (or `claude auth login`) first, then run `asx load claude <name>`.');
     }
     const email = await extractClaudeEmail(current);
-    await setSecret(PROVIDER, accountName, current, { email, label: label || accountName });
+    await setSecret(PROVIDER, accountName, current);
 
     addAccount({
       provider: PROVIDER,

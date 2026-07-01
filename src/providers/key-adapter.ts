@@ -49,7 +49,7 @@ export function createKeyAdapter(provider: string): ProviderAdapter {
       if (provider === 'grok') {
         email = tryExtractGrokEmail();
       }
-      await setSecret(provider, accountName, val, { email, label: label || accountName });
+      await setSecret(provider, accountName, val);
 
       addAccount({ provider, name: accountName, label: label || accountName, email });
     },

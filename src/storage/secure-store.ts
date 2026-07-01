@@ -19,12 +19,11 @@ try {
 const VAULT_SERVICE = 'asx';
 const VAULT_ACCOUNT = 'vault';
 
+// The vault holds only the credential. All account metadata (email, label, etc.)
+// lives in account-store (accounts.json) — the single source of truth for it.
 interface VaultAccount {
   credential: string;
-  email?: string;
-  label?: string;
   addedAt: string;
-  meta?: any;
 }
 
 interface VaultData {
@@ -126,15 +125,10 @@ function makeKey(provider: string, name: string): string {
   return `${provider}:${name}`;
 }
 
-export async function setSecret(provider: string, name: string, value: string, extra?: { email?: string; label?: string }): Promise<void> {
+export async function setSecret(provider: string, name: string, value: string): Promise<void> {
   const key = makeKey(provider, name);
   const v = await loadVault();
-  v.accounts[key] = {
-    credential: value,
-    addedAt: new Date().toISOString(),
-    email: extra?.email,
-    label: extra?.label,
-  };
+  v.accounts[key] = { credential: value, addedAt: new Date().toISOString() };
   await saveVault(v);
 }
 

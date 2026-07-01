@@ -80,7 +80,7 @@ async function attemptCodexNativeRefresh(accountName: string): Promise<boolean> 
     if (!fresh) return false;
 
     const email = extractCodexEmail(fresh);
-    await setSecret(P, accountName, fresh, { email, label: accountName });
+    await setSecret(P, accountName, fresh);
     addAccount({ provider: P, name: accountName, label: accountName, email });
 
     return true;
@@ -145,7 +145,7 @@ export const codexAdapter: ProviderAdapter = {
     const cur = readCodexAuth();
     if (!cur) throw new Error('No ~/.codex/auth.json found. Login with `codex` first.');
     const email = extractCodexEmail(cur);
-    await setSecret(P, name, cur, { email, label: label || name });
+    await setSecret(P, name, cur);
 
     addAccount({ provider: P, name, label: label || name, email });
   },
