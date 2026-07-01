@@ -197,8 +197,16 @@ export const claudeCodeAdapter: ProviderAdapter = {
     }
     const j: any = await res.json();
     const updated = { claudeAiOauth: { ...o, accessToken: j.access_token, refreshToken: j.refresh_token || o.refreshToken, expiresAt: Date.now() + (j.expires_in || 0) * 1000 } };
-    await setSecret(PROVIDER, accountName || '', JSON.stringify(updated));
-    return { ok: true, message: `refreshed (expires ${new Date(updated.claudeAiOauth.expiresAt).toISOString()})` };
+    const newRaw = JSON.stringify(updated);
+    await setSecret(PROVIDER, accountName || '', newRaw);
+    // If this account is the one currently live in the system, push the refreshed token to
+    // the native store too (keychain / ~/.claude) so the native `claude` binary and any
+    // non-isolated exec use the fresh token instead of the stale one.
+    let syncedNative = false;
+    try {
+      if (readCurrentCredentials() === raw) { writeActiveCredentials(newRaw); syncedNative = true; }
+    } catch {}
+    return { ok: true, message: `refreshed (expires ${new Date(updated.claudeAiOauth.expiresAt).toISOString()})${syncedNative ? ' [native synced]' : ''}` };
   },
 
   async getUsage(accountName?: string) {
