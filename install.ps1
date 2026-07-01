@@ -3,6 +3,12 @@ $ErrorActionPreference = "Stop"
 $Repo = if ($env:ASX_REPO) { $env:ASX_REPO } else { "enif-lee/asx" }
 $Version = if ($env:ASX_VERSION) { $env:ASX_VERSION } else { "latest" }
 $MinNodeMajor = 20
+$GithubToken = if ($env:GH_TOKEN) { $env:GH_TOKEN } else { $env:GITHUB_TOKEN }
+$GithubHeaders = @{}
+if ($GithubToken) {
+  $GithubHeaders["Authorization"] = "Bearer $GithubToken"
+  $GithubHeaders["Accept"] = "application/vnd.github+json"
+}
 
 function Write-Step($Message) {
   Write-Host $Message
@@ -80,7 +86,7 @@ function Get-ReleasePackage {
     $apiUrl = "https://api.github.com/repos/$Repo/releases/tags/$Version"
   }
 
-  $release = Invoke-RestMethod -Uri $apiUrl
+  $release = Invoke-RestMethod -Uri $apiUrl -Headers $GithubHeaders
   $asset = $release.assets | Where-Object { $_.name -match '^asx-.*\.tgz$' } | Select-Object -First 1
   if (-not $asset) {
     $asset = $release.assets | Where-Object { $_.name -match '\.tgz$' } | Select-Object -First 1
@@ -90,7 +96,15 @@ function Get-ReleasePackage {
   }
 
   $packagePath = Join-Path ([IO.Path]::GetTempPath()) $asset.name
-  Invoke-WebRequest -Uri $asset.browser_download_url -OutFile $packagePath
+  if ($GithubToken) {
+    $downloadHeaders = @{
+      Authorization = "Bearer $GithubToken"
+      Accept = "application/octet-stream"
+    }
+    Invoke-WebRequest -Uri $asset.url -Headers $downloadHeaders -OutFile $packagePath
+  } else {
+    Invoke-WebRequest -Uri $asset.browser_download_url -OutFile $packagePath
+  }
   return $packagePath
 }
 

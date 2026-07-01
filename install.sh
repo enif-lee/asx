@@ -4,6 +4,10 @@ set -eu
 REPO="${ASX_REPO:-enif-lee/asx}"
 VERSION="${ASX_VERSION:-latest}"
 MIN_NODE_MAJOR=20
+GITHUB_AUTH_TOKEN="${GH_TOKEN:-}"
+if [ -z "$GITHUB_AUTH_TOKEN" ]; then
+  GITHUB_AUTH_TOKEN="${GITHUB_TOKEN:-}"
+fi
 
 log() { printf '%s\n' "$*"; }
 die() { printf 'asx install error: %s\n' "$*" >&2; exit 1; }
@@ -65,9 +69,13 @@ download_release_package() {
     api_url="https://api.github.com/repos/$REPO/releases/tags/$VERSION"
   fi
 
-  curl -fsSL "$api_url" -o "$release_json" || die "failed to read GitHub release metadata from $api_url"
+  if [ -n "$GITHUB_AUTH_TOKEN" ]; then
+    curl -fsSL -H "Authorization: Bearer $GITHUB_AUTH_TOKEN" -H "Accept: application/vnd.github+json" "$api_url" -o "$release_json" || die "failed to read GitHub release metadata from $api_url"
+  else
+    curl -fsSL "$api_url" -o "$release_json" || die "failed to read GitHub release metadata from $api_url"
+  fi
 
-  asset_url="$(ASX_RELEASE_JSON="$release_json" node <<'NODE'
+  asset_url="$(ASX_RELEASE_JSON="$release_json" GITHUB_AUTH_TOKEN="$GITHUB_AUTH_TOKEN" node <<'NODE'
 const fs = require('node:fs');
 const release = JSON.parse(fs.readFileSync(process.env.ASX_RELEASE_JSON, 'utf8'));
 const assets = Array.isArray(release.assets) ? release.assets : [];
@@ -77,11 +85,15 @@ if (!asset || !asset.browser_download_url) {
   console.error(`No asx .tgz release asset found for ${tag}.`);
   process.exit(1);
 }
-console.log(asset.browser_download_url);
+console.log(process.env.GITHUB_AUTH_TOKEN ? asset.url : asset.browser_download_url);
 NODE
 )" || die "failed to find ASX release artifact"
 
-  curl -fL "$asset_url" -o "$package_path" || die "failed to download $asset_url"
+  if [ -n "$GITHUB_AUTH_TOKEN" ]; then
+    curl -fL -H "Authorization: Bearer $GITHUB_AUTH_TOKEN" -H "Accept: application/octet-stream" "$asset_url" -o "$package_path" || die "failed to download $asset_url"
+  else
+    curl -fL "$asset_url" -o "$package_path" || die "failed to download $asset_url"
+  fi
   printf '%s\n' "$package_path"
 }
 
