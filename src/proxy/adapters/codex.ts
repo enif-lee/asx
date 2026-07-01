@@ -8,7 +8,7 @@
 //   SSE: response.output_text.delta {delta}, response.output_text.done {text}, response.completed.
 import { randomUUID } from 'node:crypto';
 import type { BackendAdapter, CommonRequest, CommonEvent, CommonResponse } from '../types.js';
-import { backendModel } from '../models.js';
+import { resolveChoice } from '../models.js';
 
 const CODEX_URL = 'https://chatgpt.com/backend-api/codex/responses';
 
@@ -26,8 +26,10 @@ export const codexBackend: BackendAdapter = {
       role: m.role === 'tool' ? 'user' : m.role,
       content: [{ type: m.role === 'assistant' ? 'output_text' : 'input_text', text: m.content }],
     }));
+    // The agent sends the picked choice id (e.g. "gpt-5.5-high") as the model.
+    const choice = resolveChoice('codex', req.model);
     const body = {
-      model: backendModel('codex'),
+      model: choice.model,
       instructions: req.system || 'You are a helpful assistant.',
       input,
       stream: true,           // codex backend only streams; server accumulates if agent wanted non-stream
@@ -35,7 +37,7 @@ export const codexBackend: BackendAdapter = {
       tools: [],              // ponytail: tool translation deferred to M2
       tool_choice: 'auto',
       parallel_tool_calls: false,
-      reasoning: { effort: req.reasoningEffort || 'low' },
+      reasoning: { effort: choice.effort || req.reasoningEffort || 'low' },
       include: [],
     };
     return {
