@@ -27,6 +27,19 @@ function deriveAccountName(email: string | undefined, provider: string): string 
   return `${local}.${short}`;
 }
 
+// Forge a structurally valid (unsigned) JWT + codex auth.json so the codex binary boots
+// under a non-codex profile. Codex parses the id_token's claims locally; real calls hit the proxy.
+function fakeCodexAuth(): string {
+  const b64 = (o: any) => Buffer.from(JSON.stringify(o)).toString('base64url');
+  const claims = {
+    exp: Math.floor(Date.now() / 1000) + 365 * 24 * 3600,
+    'https://api.openai.com/auth': { chatgpt_account_id: 'asx-proxy', chatgpt_plan_type: 'pro' },
+    email: 'proxy@asx.local',
+  };
+  const jwt = `${b64({ alg: 'none', typ: 'JWT' })}.${b64(claims)}.sig`;
+  return JSON.stringify({ OPENAI_API_KEY: null, tokens: { id_token: jwt, access_token: jwt, refresh_token: 'asx-proxy-refresh', account_id: 'asx-proxy' }, last_refresh: new Date().toISOString() });
+}
+
 const program = new Command();
 
 program
@@ -469,12 +482,14 @@ program
             const d = path.join(tmpDir, 'codex');
             fs.mkdirSync(d, { recursive: true });
             env.CODEX_HOME = d;
-            // Seed minimal Codex auth.json so it thinks it's logged in (structure from real auth).
-            // If the profile itself is codex, prefer the real one for better fidelity.
-            let codexAuth = '{"email":"proxy@asx.local","tokens":{"id_token":"dummy"}}';
+            // Seed a Codex auth.json so the binary boots without a login screen. It validates
+            // the id_token as a structurally valid JWT, so a bare string won't do — forge a
+            // well-formed (unsigned) JWT with far-future expiry. Real backend auth is the proxy's.
+            let codexAuth: string;
             if (profileProvider === 'codex') {
-              const real = await getSecret(profileProvider, accountName);
-              if (real) codexAuth = real;
+              codexAuth = (await getSecret(profileProvider, accountName)) || fakeCodexAuth();
+            } else {
+              codexAuth = fakeCodexAuth();
             }
             try {
               fs.writeFileSync(path.join(d, 'auth.json'), codexAuth, { mode: 0o600 });

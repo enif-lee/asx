@@ -4,7 +4,8 @@
 //   body { model, messages:[{role,content}], temperature, max_tokens, tools?, stream }
 //   stream response: strict chat.completion.chunk (id/object/created/model/choices required),
 //   terminated by `data: [DONE]`.
-import type { AgentAdapter, CommonRequest, CommonEvent, CommonResponse, StreamCtx } from '../types.js';
+import type { AgentAdapter, BackendAdapter, CommonRequest, CommonEvent, CommonResponse, StreamCtx } from '../types.js';
+import { resolveChoice } from '../models.js';
 
 function toText(content: any): string {
   if (typeof content === 'string') return content;
@@ -59,3 +60,58 @@ export const grokAgent: AgentAdapter = {
 };
 
 function sse(obj: any): string { return `data: ${JSON.stringify(obj)}\n\n`; }
+
+// Grok cloud backend — cli-chat-proxy.grok.com, OpenAI Chat Completions wire, OIDC session token.
+// Verified contract (grok 0.2.77): needs client-version + token-auth headers, streaming only,
+// and grok-build emits `reasoning_content` deltas before the real `content` deltas.
+const GROK_URL = 'https://cli-chat-proxy.grok.com/v1/chat/completions';
+// ponytail: pinned to the installed grok version; bump if the proxy rejects it. Upgrade path =
+// read ~/.grok/version.json, but a stale-but-recent version is accepted so a constant is fine.
+const GROK_VERSION = '0.2.77';
+
+function grokToken(cred: string): string {
+  // stored secret is either the bare JWT or a grok auth.json wrapper { "<issuer>": { key } }
+  try { const d = JSON.parse(cred); const e = d[Object.keys(d)[0]]; return e?.key || d.key || cred; } catch { return cred; }
+}
+
+export const grokBackend: BackendAdapter = {
+  buildRequest(req: CommonRequest, cred: string) {
+    const choice = resolveChoice('grok', req.model);
+    const messages = [] as any[];
+    if (req.system) messages.push({ role: 'system', content: req.system });
+    for (const m of req.messages) messages.push({ role: m.role === 'tool' ? 'user' : m.role, content: m.content });
+    return {
+      url: GROK_URL,
+      headers: {
+        'content-type': 'application/json',
+        Authorization: `Bearer ${grokToken(cred)}`,
+        'X-XAI-Token-Auth': 'xai-grok-cli',
+        'x-grok-client-version': GROK_VERSION,
+        'x-grok-client-identifier': 'grok-shell',
+        'User-Agent': `grok-shell/${GROK_VERSION} (macos; aarch64)`,
+        'x-grok-model-override': choice.model,
+      },
+      body: JSON.stringify({ model: choice.model, messages, stream: true }),
+    };
+  },
+
+  parseStreamChunk(block: string): CommonEvent[] {
+    const out: CommonEvent[] = [];
+    for (const line of block.split('\n')) {
+      if (!line.startsWith('data:')) continue;
+      const payload = line.slice(5).trim();
+      if (!payload || payload === '[DONE]') continue;
+      let j: any; try { j = JSON.parse(payload); } catch { continue; }
+      const ch = j.choices?.[0];
+      if (!ch) continue;
+      const text = ch.delta?.content;            // ignore reasoning_content for now
+      if (typeof text === 'string' && text) out.push({ type: 'text', text });
+      if (ch.finish_reason) out.push({ type: 'done', finishReason: ch.finish_reason });
+    }
+    return out;
+  },
+
+  parseResponse(json: any): CommonResponse {
+    return { text: json.choices?.[0]?.message?.content || '' };
+  },
+};

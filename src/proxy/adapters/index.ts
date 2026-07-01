@@ -1,19 +1,19 @@
 // Adapter registry. Add a provider = add one module here. No converter changes elsewhere.
 import type { AgentAdapter, BackendAdapter } from '../types.js';
-import { grokAgent } from './grok.js';
-import { codexBackend } from './codex.js';
+import { grokAgent, grokBackend } from './grok.js';
+import { codexBackend, codexAgent } from './codex.js';
 import { claudeAgent, claudeBackend } from './claude.js';
 
 const AGENTS: Record<string, AgentAdapter> = {
   grok: grokAgent,
-  // codex agent (Responses-speaking binary) — M2
+  codex: codexAgent,
   claude: claudeAgent,
 };
 
 const BACKENDS: Record<string, BackendAdapter> = {
   codex: codexBackend,
+  grok: grokBackend,
   claude: claudeBackend,
-  // grok backend (xAI key) — M2
 };
 
 const norm = (p: string) => (p.includes('claude') ? 'claude' : p.toLowerCase());

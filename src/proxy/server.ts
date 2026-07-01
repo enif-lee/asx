@@ -43,16 +43,29 @@ export async function startProxy(options: ProxyStartOptions): Promise<ProxyHandl
       const upstreamRes = await fetch(up.url, { method: 'POST', headers: up.headers, body: up.body });
       dlog(`[asx-proxy] upstream ${up.url} -> ${upstreamRes.status}`);
 
+      const ctx: StreamCtx = { id: 'chatcmpl-asx-' + reqId, created: Math.floor(Date.now() / 1000), model: common.model, first: true };
+
+      // Upstream error: consume the body once for the message, surface it to the agent's
+      // output (not a 500), and return — never fall through to re-read the locked stream.
       if (!upstreamRes.ok) {
         const errText = await upstreamRes.text().catch(() => '');
         dlog(`[asx-proxy] upstream error ${upstreamRes.status}: ${errText.slice(0, 300)}`);
+        const msg = `[asx-proxy] backend ${backendProvider} error ${upstreamRes.status}: ${errText.slice(0, 300)}`;
+        if (common.stream) {
+          res.writeHead(200, agent.streamHeaders());
+          res.write(agent.formatStreamChunk({ type: 'text', text: msg }, ctx));
+          res.write(agent.formatStreamChunk({ type: 'done' }, ctx));
+          res.end();
+        } else {
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify(agent.formatResponse({ text: msg }, common)));
+        }
+        return;
       }
-
-      const ctx: StreamCtx = { id: 'chatcmpl-asx-' + reqId, created: Math.floor(Date.now() / 1000), model: common.model, first: true };
 
       if (common.stream) {
         const hdrs = agent.streamHeaders();
-        res.writeHead(upstreamRes.ok ? 200 : upstreamRes.status, hdrs);
+        res.writeHead(200, hdrs);
         if (!upstreamRes.body) { res.end(agent.formatStreamChunk({ type: 'done' }, ctx)); return; }
 
         const reader = upstreamRes.body.getReader();

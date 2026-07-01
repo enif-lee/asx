@@ -59,6 +59,8 @@ export interface StreamCtx {
   created: number;
   model: string;
   first: boolean;
+  acc?: string;      // accumulated text (for adapters that need the full text at 'done')
+  itemId?: string;   // stable output item id (Responses wire)
 }
 
 export interface ProxyStartOptions {
