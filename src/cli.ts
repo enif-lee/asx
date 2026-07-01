@@ -192,19 +192,31 @@ program
       }
 
       try {
-        let finalName = explicitName;
+        // Resolve the email of the credential being loaded (for dedup + naming).
         let email: string | undefined;
-
-        if (!finalName && adapter.getCurrentEmail) {
+        if (adapter.getCurrentEmail) {
           email = await adapter.getCurrentEmail().catch(() => undefined);
         }
 
-        if (!finalName) {
-          finalName = deriveAccountName(email, p);
+        // Email-based dedup: if a profile with this email already exists for the
+        // provider, update it in place instead of creating a differently-named
+        // duplicate (e.g. ed.claude vs e-ed.claude for the same e-ed@ account).
+        let finalName = explicitName;
+        let updating = false;
+        if (email) {
+          const existing = listAccounts(p).find(a => a.email && a.email.toLowerCase() === email!.toLowerCase());
+          if (existing && (!explicitName || explicitName === existing.name)) {
+            finalName = existing.name;
+            updating = true;
+          } else if (existing && explicitName && explicitName !== existing.name) {
+            console.log(chalk.yellow(`Note: ${email} is already stored as ${p}/${existing.name}; saving under ${explicitName} too.`));
+          }
         }
+        if (!finalName) finalName = deriveAccountName(email, p);
 
         await adapter.loadCurrent(finalName);
-        console.log(chalk.green(`Loaded ${p}/${finalName}${email ? ` (${email})` : ''}`));
+        const verb = updating ? 'Updated' : 'Loaded';
+        console.log(chalk.green(`${verb} ${p}/${finalName}${email ? ` (${email})` : ''}`));
       } catch (e: any) {
         const msg = e.message || String(e);
         if (!provider && (msg.includes('No active') || msg.includes('No ') || msg.includes('not found') || msg.includes('found') || msg.includes('already used'))) {
