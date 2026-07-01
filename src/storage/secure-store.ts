@@ -34,7 +34,15 @@ interface VaultData {
 
 function isMac() { return platform() === 'darwin'; }
 
-async function loadVault(): Promise<VaultData> {
+// Cache the vault per process so one command triggers at most one keychain read
+// (each read can pop a macOS keychain-access prompt). Invalidated on save.
+let vaultCache: Promise<VaultData> | null = null;
+function loadVault(): Promise<VaultData> {
+  if (!vaultCache) vaultCache = loadVaultUncached();
+  return vaultCache;
+}
+
+async function loadVaultUncached(): Promise<VaultData> {
   const account = process.env.USER || process.env.USERNAME || 'user';
   let raw: string | null = null;
 
@@ -73,6 +81,7 @@ async function loadVault(): Promise<VaultData> {
 }
 
 async function saveVault(v: VaultData): Promise<void> {
+  vaultCache = Promise.resolve(v); // keep cache in sync with what we just wrote
   const data = JSON.stringify(v);
   const account = process.env.USER || process.env.USERNAME || 'user';
 
