@@ -3,7 +3,14 @@ import { execSync } from 'node:child_process';
 import { setSecret, getSecret } from '../storage/secure-store.js';
 import { addAccount } from '../storage/account-store.js';
 import { getCodexAuthPath, ensureDirFor } from '../utils/platform.js';
-import { renderBar } from '../utils/bar.js';
+import { renderBar, formatReset } from '../utils/bar.js';
+
+// Codex windows report reset_at (unix seconds) or reset_after_seconds (relative).
+function codexReset(w: any): string {
+  if (w?.reset_at) return formatReset(w.reset_at * 1000);
+  if (w?.reset_after_seconds) return formatReset(Date.now() + w.reset_after_seconds * 1000);
+  return '';
+}
 import type { ProviderAdapter } from './base.js';
 
 function extractCodexEmail(authJson: string): string | undefined {
@@ -135,14 +142,15 @@ async function fetchAndFormatCodexUsage(
     const used5 = primary.used_percent;
     const rem5 = Math.max(0, 100 - used5);
     const bar5 = renderBar(rem5);
-    const reset = primary.reset_at ? new Date(primary.reset_at * 1000).toISOString().slice(11,16)+'Z' : (primary.reset_after_seconds ? primary.reset_after_seconds+'s' : '');
-    output += `\n  5h: ${bar5} ${rem5.toFixed(1)}% / ${used5.toFixed(1)}%${reset ? ' (resets ~' + reset + ')' : ''}`;
+    const r = codexReset(primary);
+    output += `\n  5h: ${bar5} ${rem5.toFixed(1)}% / ${used5.toFixed(1)}%${r ? ` — ${r}` : ''}`;
   }
   if (secondary && typeof secondary.used_percent === 'number') {
     const used7 = secondary.used_percent;
     const rem7 = Math.max(0, 100 - used7);
     const bar7 = renderBar(rem7);
-    output += `\n  7d: ${bar7} ${rem7.toFixed(1)}% / ${used7.toFixed(1)}%`;
+    const r = codexReset(secondary);
+    output += `\n  7d: ${bar7} ${rem7.toFixed(1)}% / ${used7.toFixed(1)}%${r ? ` — ${r}` : ''}`;
   }
 
   return output;

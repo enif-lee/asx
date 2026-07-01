@@ -6,7 +6,7 @@ import { setSecret, getSecret } from '../storage/secure-store.js';
 import { addAccount, getAccount } from '../storage/account-store.js';
 import { getClaudeCredentialsPath, getPlatform, ensureDirFor } from '../utils/platform.js';
 import type { ProviderAdapter } from './base.js';
-import { renderBar } from '../utils/bar.js';
+import { renderBar, formatReset } from '../utils/bar.js';
 
 
 
@@ -262,16 +262,14 @@ export const claudeCodeAdapter: ProviderAdapter = {
       if (f && typeof f.utilization === 'number') {
         const used5 = Math.max(0, Math.min(100, f.utilization));
         const rem5 = Math.max(0, 100 - used5);
-        let resetNote = '';
-        if (f.resets_at) {
-          try { resetNote = ' (resets ~' + new Date(f.resets_at).toISOString().slice(11, 16) + 'Z)'; } catch {}
-        }
-        extra += `\n  5h: ${renderBar(rem5)} ${rem5.toFixed(1)}% / ${used5.toFixed(1)}%${resetNote}`;
+        const r = f.resets_at ? formatReset(f.resets_at) : '';
+        extra += `\n  5h: ${renderBar(rem5)} ${rem5.toFixed(1)}% / ${used5.toFixed(1)}%${r ? ` — ${r}` : ''}`;
       }
       if (s && typeof s.utilization === 'number') {
         const used7 = Math.max(0, Math.min(100, s.utilization));
         const rem7 = Math.max(0, 100 - used7);
-        extra += `\n  7d: ${renderBar(rem7)} ${rem7.toFixed(1)}% / ${used7.toFixed(1)}%`;
+        const r = s.resets_at ? formatReset(s.resets_at) : '';
+        extra += `\n  7d: ${renderBar(rem7)} ${rem7.toFixed(1)}% / ${used7.toFixed(1)}%${r ? ` — ${r}` : ''}`;
       }
       if (!extra) extra = '\n  ⚠ Unable to fetch usage — no quota data returned.';
 
