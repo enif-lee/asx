@@ -1,0 +1,50 @@
+{
+  "name": "asx",
+  "version": "0.1.0",
+  "main": "dist/cli.js",
+  "types": "dist/cli.d.ts",
+  "bin": {
+    "asx": "./dist/cli.js"
+  },
+  "type": "module",
+  "engines": {
+    "node": ">=20.0.0"
+  },
+  "scripts": {
+    "test": "vitest run",
+    "build": "tsc --build && node -e \"require('node:fs').chmodSync('dist/cli.js', 0o755)\"",
+    "dev": "tsx src/cli.ts",
+    "prepare": "npm run build",
+    "start": "node dist/cli.js"
+  },
+  "keywords": [
+    "cli",
+    "llm",
+    "account-switcher",
+    "claude-code",
+    "codex",
+    "keychain",
+    "multi-account"
+  ],
+  "author": "",
+  "license": "MIT",
+  "description": "Cross-platform multi-account switcher for Claude Code, Codex, Cursor, Grok, Z.AI and more. Credentials in OS keychain, non-destructive login, instant switch, usage via list -u. (asx = as eXtended)",
+  "dependencies": {
+    "@inquirer/prompts": "^8.5.2",
+    "chalk": "^5.6.2",
+    "cli-table3": "^0.6.5",
+    "commander": "^15.0.0",
+    "cross-keychain": "^1.1.0",
+    "zod": "^4.4.3"
+  },
+  "devDependencies": {
+    "@types/better-sqlite3": "^7.6.13",
+    "@types/fs-extra": "^11.0.4",
+    "@types/node": "^26.0.1",
+    "better-sqlite3": "^12.11.1",
+    "fs-extra": "^11.3.5",
+    "tsx": "^4.22.4",
+    "typescript": "^6.0.3",
+    "vitest": "^4.1.9"
+  }
+}
