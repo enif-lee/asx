@@ -1,21 +1,65 @@
 import fs from 'node:fs';
 import { setSecret, getSecret } from '../storage/secure-store.js';
-import { addAccount } from '../storage/account-store.js';
+import { addAccount, setActive } from '../storage/account-store.js';
 import { renderBar } from '../utils/bar.js';
 import { decodeJwtClaims } from '../utils/jwt.js';
-import { getGrokAuthPath } from '../utils/platform.js';
+import { ensureDirFor, getGrokAuthPath } from '../utils/platform.js';
 import type { ProviderAdapter } from './base.js';
 
-function getGrokAuth(): any | undefined {
+const ZAI_BASE_URL = 'https://api.z.ai/api/coding/paas/v4';
+
+function getEnvKey(provider: string): string | undefined {
+  const prefix = provider.toUpperCase();
+  return process.env[`${prefix}_API_KEY`]
+    || process.env[`${prefix}_KEY`]
+    || (provider === 'grok' ? process.env.XAI_API_KEY : undefined);
+}
+
+function getGrokAuthFile(): any | undefined {
   try {
     const grokPath = getGrokAuthPath();
     if (fs.existsSync(grokPath)) {
-      const data = JSON.parse(fs.readFileSync(grokPath, 'utf8'));
-      const entry = Object.values(data)[0] as any;
-      return entry;
+      return JSON.parse(fs.readFileSync(grokPath, 'utf8'));
     }
   } catch {}
   return undefined;
+}
+
+function getGrokAuth(): any | undefined {
+  const data = getGrokAuthFile();
+  if (!data || typeof data !== 'object') return undefined;
+  if (data.key) return data;
+  return Object.values(data)[0] as any;
+}
+
+function parseJson(raw: string): any | undefined {
+  try { return JSON.parse(raw); } catch { return undefined; }
+}
+
+function grokAuthFileFromCredential(raw: string): any {
+  const data = parseJson(raw);
+  if (data && typeof data === 'object' && !Array.isArray(data)) {
+    if (data.key) return { asx: data };
+    return data;
+  }
+  return { asx: { key: raw } };
+}
+
+function grokBearer(raw: string): string {
+  const data = parseJson(raw);
+  if (data && typeof data === 'object') {
+    if (typeof data.key === 'string') return data.key;
+    const entry = Object.values(data).find((v: any) => v && typeof v === 'object' && typeof v.key === 'string') as any;
+    if (entry?.key) return entry.key;
+  }
+  return raw;
+}
+
+function writeGrokAuth(raw: string): void {
+  const p = getGrokAuthPath();
+  ensureDirFor(p);
+  fs.writeFileSync(p, JSON.stringify(grokAuthFileFromCredential(raw)), { mode: 0o600 });
+  try { fs.chmodSync(p, 0o600); } catch {}
 }
 
 function tryExtractGrokEmail(): string | undefined {
@@ -28,18 +72,30 @@ function parseGrokTokenInfo(token: string): any {
   return decodeJwtClaims(token);
 }
 
+async function testZaiKey(key: string): Promise<void> {
+  const res = await fetch(`${ZAI_BASE_URL}/models`, {
+    headers: {
+      Authorization: `Bearer ${key}`,
+    },
+  });
+  if (!res.ok) {
+    const detail = (await res.text().catch(() => '')).slice(0, 240);
+    throw new Error(`ZAI endpoint test failed (${res.status} ${res.statusText}${detail ? `: ${detail}` : ''})`);
+  }
+}
+
 export function createKeyAdapter(provider: string): ProviderAdapter {
   return {
     name: provider,
     async loadCurrent(accountName: string, label?: string) {
       // Prefer real key from env so it gets stored in the single vault (matching openusage credential handling).
-      let val = process.env[`${provider.toUpperCase()}_KEY`] || process.env.XAI_API_KEY;
+      let val = getEnvKey(provider);
       if (!val && provider === 'grok') {
         // For Grok consumer/CLI accounts, read the token from ~/.grok/auth.json
         // (openusage appears to use this for subscription quota without XAI_API_KEY env)
-        const auth = getGrokAuth();
+        const auth = getGrokAuthFile();
         if (auth) {
-          // Store full auth entry so refresh_token etc. are preserved if present
+          // Store the full auth file so the native CLI issuer key is preserved.
           val = JSON.stringify(auth);
         }
       }
@@ -52,13 +108,31 @@ export function createKeyAdapter(provider: string): ProviderAdapter {
 
       addAccount({ provider, name: accountName, label: label || accountName, email });
     },
+    async login(accountName: string, label?: string) {
+      if (provider !== 'zai') throw new Error(`Login flow is not supported for provider '${provider}'.`);
+      const envKey = process.env.ASX_ZAI_API_KEY;
+      const key = (envKey || await (async () => {
+        const { password } = await import('@inquirer/prompts');
+        return password({ message: 'Paste Z.AI API key:' });
+      })()).trim();
+      if (!key) throw new Error('No Z.AI API key provided.');
+
+      await testZaiKey(key);
+      await setSecret(provider, accountName, key);
+      addAccount({ provider, name: accountName, label: label || accountName });
+      setActive(provider, accountName);
+    },
     async switchTo(accountName: string) {
       const v = await getSecret(provider, accountName);
       if (!v) throw new Error(`No key for ${provider}/${accountName}`);
-      // For pure key providers we just set in process or print export advice
-      process.env[`${provider.toUpperCase()}_API_KEY`] = v;
+      if (provider === 'grok') {
+        writeGrokAuth(v);
+        process.env.XAI_API_KEY = grokBearer(v);
+      } else {
+        // For pure key providers we just set in process or print export advice
+        process.env[`${provider.toUpperCase()}_API_KEY`] = v;
+      }
       console.log(`[as] ${provider} key for ${accountName} is now active in this process.`);
-      const { setActive } = await import('../storage/account-store.js');
       setActive(provider, accountName);
     },
     async getUsage(accountName?: string) {
@@ -73,6 +147,7 @@ export function createKeyAdapter(provider: string): ProviderAdapter {
         }
       }
       if (!key) return `API key (no live quota data)${suffix}`;
+      if (provider === 'grok') key = grokBearer(key);
 
       const isGrok = provider === 'grok';
       const base = 'https://api.x.ai/v1';
@@ -208,19 +283,22 @@ export function createKeyAdapter(provider: string): ProviderAdapter {
 
     async getCurrentCredential() {
       if (provider === 'grok') {
-        const auth = getGrokAuth();
+        const auth = getGrokAuthFile();
         return auth ? JSON.stringify(auth) : null;
       }
       // For other key providers (e.g. zai), prefer the env if present
-      const envKey = process.env[`${provider.toUpperCase()}_KEY`] || process.env.XAI_API_KEY || process.env.ZAI_API_KEY;
-      return envKey || null;
+      return getEnvKey(provider) || null;
     },
 
     async clearCurrent() {
-      // API-key providers have no local persistent session to clear.
+      if (provider === 'grok') {
+        try { fs.rmSync(getGrokAuthPath(), { force: true }); } catch {}
+      }
+      // Other API-key providers have no local persistent session to clear.
     },
 
     getLoginCommand() {
+      if (provider === 'grok') return ['grok', 'login'];
       return null;
     },
   };

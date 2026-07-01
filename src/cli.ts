@@ -336,10 +336,22 @@ async function runLoginFlow(p: string, adapter: any, name?: string, opts: { long
     return true;
   }
 
+  if (p === 'zai' && typeof adapter.login === 'function') {
+    const targetName = name || deriveAccountName(undefined, p);
+    try {
+      await adapter.login(targetName);
+      console.log(chalk.green(`Loaded ${p}/${targetName} after login.`));
+      return true;
+    } catch (e: any) {
+      console.error(chalk.red(`Failed to login ${p}/${targetName}: ${e.message || e}`));
+      return false;
+    }
+  }
+
   const loginCmd = typeof adapter.getLoginCommand === 'function' ? adapter.getLoginCommand() : null;
   if (!loginCmd || loginCmd.length === 0) {
     console.log(chalk.yellow(`Login flow is not supported for provider '${p}'.`));
-    console.log(chalk.gray(`For API-key providers (grok, zai, ...) use environment variables or run the native tool then 'asx load ${p} <name>'.`));
+    console.log(chalk.gray(`For API-key providers without a login flow, use environment variables or run the native tool then 'asx load ${p} <name>'.`));
     return false;
   }
 

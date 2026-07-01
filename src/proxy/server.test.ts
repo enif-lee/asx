@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { forEachUpstreamEvent } from './server.js';
+import { forEachUpstreamEvent, startProxy } from './server.js';
 import type { CommonEvent } from './types.js';
 
 // Fake backend: each SSE block "data: <text>" -> text event; "data: [DONE]" -> done.
@@ -56,5 +56,18 @@ describe('forEachUpstreamEvent', () => {
     const evs: CommonEvent[] = [];
     await forEachUpstreamEvent(null, backend, (e) => evs.push(e));
     expect(evs).toEqual([]);
+  });
+});
+
+describe('proxy metadata endpoints', () => {
+  it('serves backend model choices on /v1/models', async () => {
+    const proxy = await startProxy({ sourceProvider: 'codex', targetProvider: 'zai', targetCredential: { raw: 'zai-key' } });
+    try {
+      const res = await fetch(`${proxy.url}/v1/models`);
+      const body: any = await res.json();
+      expect(body.data.map((m: any) => m.id)).toContain('glm-5.2');
+    } finally {
+      proxy.stop();
+    }
   });
 });

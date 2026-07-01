@@ -23,6 +23,9 @@ function defaults(provider: string): BackendChoice[] {
   if (p === 'grok' || p === 'xai') {
     return ['grok-build'].map((m) => ({ id: m, model: m }));
   }
+  if (p === 'zai') {
+    return ['glm-5.2', 'glm-5-turbo', 'glm-4.7', 'glm-4.5-air'].map((m) => ({ id: m, model: m }));
+  }
   return [{ id: 'asx-proxy', model: 'asx-proxy' }];
 }
 

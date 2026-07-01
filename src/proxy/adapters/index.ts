@@ -3,6 +3,7 @@ import type { AgentAdapter, BackendAdapter } from '../types.js';
 import { grokAgent, grokBackend } from './grok.js';
 import { codexBackend, codexAgent } from './codex.js';
 import { claudeAgent, claudeBackend } from './claude.js';
+import { zaiBackend } from './zai.js';
 
 const AGENTS: Record<string, AgentAdapter> = {
   grok: grokAgent,
@@ -14,6 +15,7 @@ const BACKENDS: Record<string, BackendAdapter> = {
   codex: codexBackend,
   grok: grokBackend,
   claude: claudeBackend,
+  zai: zaiBackend,
 };
 
 const norm = (p: string) => (p.includes('claude') ? 'claude' : p.toLowerCase());

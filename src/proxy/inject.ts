@@ -18,7 +18,7 @@ export async function injectProxyEndpoint(
   const choices = backendChoices(backendProvider || prov);
 
   if (prov === 'codex') {
-    await injectCodexProxy(tmpDir, proxyBaseUrl, env);
+    await injectCodexProxy(tmpDir, proxyBaseUrl, env, choices.map((c) => c.id));
   } else if (prov.includes('claude')) {
     await injectClaudeProxy(env, proxyBaseUrl);
   } else if (prov === 'grok') {
@@ -26,7 +26,7 @@ export async function injectProxyEndpoint(
   }
 }
 
-async function injectCodexProxy(tmpDir: string | undefined, proxyBaseUrl: string, env: NodeJS.ProcessEnv) {
+async function injectCodexProxy(tmpDir: string | undefined, proxyBaseUrl: string, env: NodeJS.ProcessEnv, models: string[]) {
   // Determine the private CODEX_HOME we control
   let codexHome = env.CODEX_HOME as string | undefined;
   if (!codexHome && tmpDir) {
@@ -46,6 +46,7 @@ async function injectCodexProxy(tmpDir: string | undefined, proxyBaseUrl: string
   fs.mkdirSync(codexHome, { recursive: true });
 
   const providerId = 'asx-proxy';
+  const model = models[0] || 'asx-proxy';
   // Important: Codex expects base_url to point to the root where /v1 or /responses lives.
   // We follow opencodex convention: base_url ends with /v1, wire_api=responses.
   const base = proxyBaseUrl.replace(/\/+$/, '');
@@ -54,6 +55,7 @@ async function injectCodexProxy(tmpDir: string | undefined, proxyBaseUrl: string
   // We overwrite the file with a minimal reliable content for this isolated run.
   const cleanConfig = `# ASX Proxy injected config for cross-provider execution
 # This file is inside a private CODEX_HOME for this run only.
+model = ${JSON.stringify(model)}
 model_provider = "${providerId}"
 
 [model_providers.${providerId}]

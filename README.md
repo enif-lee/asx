@@ -82,7 +82,7 @@ asx e ed.claude xai "explain with grok"
 |--------------------------|-------------|
 | `asx list [provider] [-u/-d]` | List accounts. `-u/--usage` shows live quota bars. `-d/--debug` dumps stored credentials. Marks the live system credential with `(current in system)`. |
 | `asx load [provider] [name]` | Snapshot the currently active credential(s) from the provider into asx. Auto-generates name like `ed.claude` / `ed.codex` if omitted. |
-| `asx login <provider> [name] [--long-lived]` | Login and store a new account. Claude defaults to native access/refresh tokens in isolated `CLAUDE_CONFIG_DIR`; `--long-lived` uses `claude setup-token`. |
+| `asx login <provider> [name] [--long-lived]` | Login and store a new account. Claude defaults to native access/refresh tokens in isolated `CLAUDE_CONFIG_DIR`; Grok runs native `grok login`; ZAI asks for an API key and tests the endpoint; `--long-lived` uses `claude setup-token`. |
 | `asx rename <from> <to>` | Rename an account (updates vault + metadata + active markers). |
 | `asx switch <provider> <name>` (alias: `s`) | Switch the active credential for a provider. |
 | `asx status [provider]` | Show asx-tracked active account(s). |
@@ -95,8 +95,8 @@ asx e ed.claude xai "explain with grok"
 |--------------|----------------|------------------------------------------------|---------------------------|
 | Claude Code  | `claude`       | Native access/refresh tokens in isolated `CLAUDE_CONFIG_DIR`; optional long-lived `CLAUDE_CODE_OAUTH_TOKEN` | 5h / 7d bars (accurate)   |
 | Codex        | `codex`        | `~/.codex/auth.json` (respects `$CODEX_HOME`)     | 5h / 7d windows           |
-| Grok / xAI   | `grok`         | `~/.grok/auth.json` (respects `$GROK_HOME`)       | Credits + rate limits     |
-| Z.AI         | `zai`          | Environment variable                              | Basic key info            |
+| Grok / xAI   | `grok`         | Native `grok login`; `~/.grok/auth.json` (respects `$GROK_HOME`) | Credits + rate limits     |
+| Z.AI         | `zai`          | API key via `asx login zai`; `ZAI_API_KEY`/`ZAI_KEY` for `asx load` | Basic key info            |
 | Cursor       | `cursor`       | Metadata only (limited)                           | Metadata only             |
 
 More providers can be added easily via the adapter pattern.

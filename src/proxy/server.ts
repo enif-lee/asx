@@ -2,6 +2,7 @@ import http from 'node:http';
 import { randomUUID } from 'node:crypto';
 import type { ProxyHandle, ProxyStartOptions, CommonEvent, StreamCtx } from './types.js';
 import { pickAgent, pickBackend } from './adapters/index.js';
+import { backendChoices } from './models.js';
 import { dlog } from '../utils/log.js';
 
 // Short-lived in-process proxy for one exec session.
@@ -21,9 +22,22 @@ export async function startProxy(options: ProxyStartOptions): Promise<ProxyHandl
     const reqId = randomUUID().slice(0, 8);
     const urlPath = (req.url || '').split('?')[0];
     const isInference = req.method === 'POST' && /\/(v1\/)?(responses|messages|chat\/completions|completions)/.test(urlPath);
+    const isModels = req.method === 'GET' && /\/(v1\/)?models\/?$/.test(urlPath);
     dlog(`[asx-proxy] ${req.method} ${urlPath} (agent=${agentProvider}->backend=${backendProvider}, id=${reqId}${isInference ? ', inference' : ''})`);
 
     try {
+      if (isModels) {
+        const data = backendChoices(backendProvider).map((m) => ({
+          id: m.id,
+          object: 'model',
+          created: 0,
+          owned_by: `asx-${backendProvider}`,
+        }));
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ object: 'list', data }));
+        return;
+      }
+
       // Non-inference startup checkpoints (auth/status/billing). Real auth is the backend cred.
       if (!isInference) {
         res.writeHead(200, { 'Content-Type': 'application/json' });

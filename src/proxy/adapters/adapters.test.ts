@@ -2,6 +2,7 @@ import { describe, it, expect } from 'vitest';
 import { grokAgent, grokBackend } from './grok.js';
 import { codexAgent, codexBackend } from './codex.js';
 import { claudeAgent, claudeBackend } from './claude.js';
+import { zaiBackend } from './zai.js';
 import type { StreamCtx, CommonEvent } from '../types.js';
 
 const ctx = (model = 'm'): StreamCtx => ({ id: 'id1', created: 1, model, first: true });
@@ -98,5 +99,19 @@ describe('claude agent done-only', () => {
     expect(out).toContain('message_start');
     expect(out).toContain('content_block_start');
     expect(out).toContain('message_stop');
+  });
+});
+
+describe('zai backend (OpenAI chat completions)', () => {
+  it('uses the coding endpoint and maps model ids', () => {
+    const { url, headers, body } = zaiBackend.buildRequest(
+      { model: 'glm-4.7', system: 'S', messages: [{ role: 'user', content: 'hi' }], stream: true } as any,
+      'zai-key',
+    );
+    const b = JSON.parse(body);
+    expect(url).toBe('https://api.z.ai/api/coding/paas/v4/chat/completions');
+    expect(headers.Authorization).toBe('Bearer zai-key');
+    expect(b.model).toBe('glm-4.7');
+    expect(b.messages[0]).toEqual({ role: 'system', content: 'S' });
   });
 });

@@ -38,4 +38,7 @@ export interface ProviderAdapter {
   // Store a manually issued provider token. Used by providers whose native login
   // can mint a token that should stay in asx instead of native keychain/config.
   loadLongLivedToken?(accountName: string, token: string): Promise<void>;
+
+  // Login flow for providers that only have an API key, not a native CLI session.
+  login?(accountName: string, label?: string): Promise<void>;
 }
