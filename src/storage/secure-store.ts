@@ -42,39 +42,60 @@ function loadVault(): Promise<VaultData> {
   return vaultCache;
 }
 
-async function loadVaultUncached(): Promise<VaultData> {
+// Storage policy: a 0600 file is the default vault. The macOS keychain reprompts
+// ("Always Allow" doesn't stick — every save rewrites the item and resets its ACL),
+// and the native tools already keep these same tokens in plaintext ~/.codex/auth.json
+// etc. Opt into the keychain with ASX_KEYCHAIN=1.
+function useKeychain(): boolean { return !!process.env.ASX_KEYCHAIN; }
+function vaultFile(): string { return path.join(getAsxConfigDir(), 'vault.json'); }
+
+function readKeychain(): string | null {
   const account = process.env.USER || process.env.USERNAME || 'user';
-  let raw: string | null = null;
-
-  if (crossKeychain?.getPassword) {
+  if (isMac()) {
     try {
-      raw = await crossKeychain.getPassword(VAULT_SERVICE, account);
-    } catch {}
-  }
-
-  if (!raw && isMac()) {
-    try {
-      raw = execSync(
+      return execSync(
         `security find-generic-password -s ${JSON.stringify(VAULT_SERVICE)} -a ${JSON.stringify(account)} -w`,
         { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }
       ).trim();
     } catch {}
   }
+  return null;
+}
 
-  if (raw) {
-    try {
-      const parsed = JSON.parse(raw);
-      if (parsed && parsed.accounts) return parsed as VaultData;
-    } catch {}
+function writeFileVault(data: string): void {
+  const f = vaultFile();
+  ensureDirFor(f);
+  fs.writeFileSync(f, data);
+  try { fs.chmodSync(f, 0o600); } catch {}
+}
+
+async function loadVaultUncached(): Promise<VaultData> {
+  const parse = (raw: string | null): VaultData | null => {
+    if (!raw) return null;
+    try { const p = JSON.parse(raw); return p && p.accounts ? (p as VaultData) : null; } catch { return null; }
+  };
+
+  // Default: file-first (no keychain prompt).
+  const f = vaultFile();
+  if (fs.existsSync(f)) {
+    const v = parse(fs.readFileSync(f, 'utf8'));
+    if (v) return v;
   }
 
-  // fallback file
-  const f = path.join(getAsxConfigDir(), 'vault.json');
-  if (fs.existsSync(f)) {
-    try {
-      const parsed = JSON.parse(fs.readFileSync(f, 'utf8'));
-      if (parsed && parsed.accounts) return parsed as VaultData;
-    } catch {}
+  // No file yet: one-time migration from a legacy keychain vault (or opt-in keychain).
+  // Prefer crossKeychain.getPassword — the `security -w` fallback returns the item as
+  // hex, which won't parse. This read happens once, then the file takes over.
+  const account = process.env.USER || process.env.USERNAME || 'user';
+  let raw: string | null = null;
+  if (crossKeychain?.getPassword) {
+    try { raw = await crossKeychain.getPassword(VAULT_SERVICE, account); } catch {}
+  }
+  if (!raw) raw = readKeychain();
+  const v = parse(raw);
+  if (v) {
+    // Persist to the file so subsequent runs never touch the keychain again.
+    if (!useKeychain()) writeFileVault(JSON.stringify(v));
+    return v;
   }
 
   return { version: 1, accounts: {} };
@@ -83,30 +104,22 @@ async function loadVaultUncached(): Promise<VaultData> {
 async function saveVault(v: VaultData): Promise<void> {
   vaultCache = Promise.resolve(v); // keep cache in sync with what we just wrote
   const data = JSON.stringify(v);
-  const account = process.env.USER || process.env.USERNAME || 'user';
+  writeFileVault(data); // file is the source of truth by default
 
-  if (crossKeychain?.setPassword) {
-    try {
-      await crossKeychain.setPassword(VAULT_SERVICE, account, data);
-      return;
-    } catch {}
+  if (useKeychain()) {
+    const account = process.env.USER || process.env.USERNAME || 'user';
+    if (crossKeychain?.setPassword) {
+      try { await crossKeychain.setPassword(VAULT_SERVICE, account, data); return; } catch {}
+    }
+    if (isMac()) {
+      try {
+        execSync(
+          `security add-generic-password -s ${JSON.stringify(VAULT_SERVICE)} -a ${JSON.stringify(account)} -w ${JSON.stringify(data)} -U`,
+          { stdio: 'ignore' }
+        );
+      } catch {}
+    }
   }
-
-  if (isMac()) {
-    try {
-      execSync(
-        `security add-generic-password -s ${JSON.stringify(VAULT_SERVICE)} -a ${JSON.stringify(account)} -w ${JSON.stringify(data)} -U`,
-        { stdio: 'ignore' }
-      );
-      return;
-    } catch {}
-  }
-
-  // fallback file
-  const f = path.join(getAsxConfigDir(), 'vault.json');
-  ensureDirFor(f);
-  fs.writeFileSync(f, data);
-  try { fs.chmodSync(f, 0o600); } catch {}
 }
 
 function makeKey(provider: string, name: string): string {
