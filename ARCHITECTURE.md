@@ -123,8 +123,6 @@ A `0600` file vault is only used when keychain storage is unavailable:
 <platform config dir>/asx/vault.json
 ```
 
-Existing file vaults are migrated into the keychain on the next read or write. After a successful keychain write, the fallback file is removed.
-
 ### Vault vs Provider-Native State
 
 The ASX vault stores profile credentials. Provider-native state is what the original tool reads when it runs normally.

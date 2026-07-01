@@ -42,31 +42,22 @@ function loadVault(): Promise<VaultData> {
 }
 
 // Storage policy: platform keychain first. A 0600 file is only a fallback when
-// the keychain is unavailable, and existing file vaults are migrated into keychain.
+// the keychain is unavailable.
 function vaultFile(): string { return path.join(getAsxConfigDir(), 'vault.json'); }
 
-function legacyKeychainAccount(): string {
-  return process.env.USER || process.env.USERNAME || 'user';
-}
-
-async function readKeychainAccount(account: string): Promise<string | null> {
+async function readKeychain(): Promise<string | null> {
   if (crossKeychain?.getPassword) {
-    try { return await crossKeychain.getPassword(VAULT_SERVICE, account); } catch {}
+    try { return await crossKeychain.getPassword(VAULT_SERVICE, VAULT_ACCOUNT); } catch {}
   }
   if (isMac()) {
     try {
       return execSync(
-        `security find-generic-password -s ${JSON.stringify(VAULT_SERVICE)} -a ${JSON.stringify(account)} -w`,
+        `security find-generic-password -s ${JSON.stringify(VAULT_SERVICE)} -a ${JSON.stringify(VAULT_ACCOUNT)} -w`,
         { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }
       ).trim();
     } catch {}
   }
   return null;
-}
-
-async function readKeychain(): Promise<string | null> {
-  return await readKeychainAccount(VAULT_ACCOUNT)
-    || await readKeychainAccount(legacyKeychainAccount());
 }
 
 async function writeKeychain(data: string): Promise<boolean> {
@@ -104,19 +95,8 @@ async function loadVaultUncached(): Promise<VaultData> {
 
   const f = vaultFile();
   const keychainVault = parse(await readKeychain());
-  const fileVault = fs.existsSync(f) ? parse(fs.readFileSync(f, 'utf8')) : null;
-
-  if (keychainVault && !fileVault) return keychainVault;
-
-  if (fileVault) {
-    // Existing file vaults came from the previous file-first policy, so treat the
-    // file as newer during migration and then remove it once keychain write works.
-    const merged: VaultData = keychainVault
-      ? { version: Math.max(keychainVault.version || 1, fileVault.version || 1), accounts: { ...keychainVault.accounts, ...fileVault.accounts } }
-      : fileVault;
-    if (await writeKeychain(JSON.stringify(merged))) removeFileVault();
-    return merged;
-  }
+  if (keychainVault) return keychainVault;
+  if (fs.existsSync(f)) return parse(fs.readFileSync(f, 'utf8')) || { version: 1, accounts: {} };
 
   return { version: 1, accounts: {} };
 }

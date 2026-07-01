@@ -116,7 +116,6 @@ More providers can be added easily via the adapter pattern.
   - ZAI native credential: no native agent state; ASX stores the API key.
 - `asx load` reads the currently active provider-native credential and saves a profile copy in the ASX vault.
 - `asx switch` writes a stored profile back to provider-native state when the provider has one. ZAI only updates ASX's active marker and process env for the current command.
-- Existing fallback `vault.json` files are migrated into the platform keychain on the next ASX vault read or write, then removed after a successful keychain write.
 
 ### Login And Execution
 

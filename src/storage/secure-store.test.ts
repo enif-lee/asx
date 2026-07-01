@@ -92,7 +92,8 @@ describe('secure store vault backend', () => {
     expect(fileVault.accounts['zai:personal.zai'].credential).toBe('zai-key');
   });
 
-  it('migrates an existing file vault into keychain', async () => {
+  it('reads the file vault only when keychain read fails', async () => {
+    state.failGet = true;
     const file = path.join(configDir(home), 'vault.json');
     fs.mkdirSync(path.dirname(file), { recursive: true });
     fs.writeFileSync(file, JSON.stringify({
@@ -103,7 +104,7 @@ describe('secure store vault backend', () => {
     const store = await import('./secure-store.js');
 
     await expect(store.getSecret('zai', 'personal.zai')).resolves.toBe('file-key');
-    expect(JSON.parse(state.keychainRaw!).accounts['zai:personal.zai'].credential).toBe('file-key');
-    expect(fs.existsSync(file)).toBe(false);
+    expect(state.keychainRaw).toBeNull();
+    expect(fs.existsSync(file)).toBe(true);
   });
 });
