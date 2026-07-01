@@ -4,11 +4,18 @@ ASX is a small CLI that separates credential ownership from agent execution.
 
 The core path is:
 
-```text
-provider native auth or API key
-  -> ASX vault profile
-  -> isolated agent runtime
-  -> optional ASX Proxy when agent wire and backend provider differ
+```mermaid
+flowchart LR
+  Native["Provider native auth<br/>or API key"]
+  Vault["ASX vault profile"]
+  Runtime["Isolated agent runtime"]
+  Proxy{"Agent wire differs<br/>from backend provider?"}
+  Direct["Provider upstream"]
+  AsxProxy["ASX Proxy"]
+
+  Native --> Vault --> Runtime --> Proxy
+  Proxy -- "No" --> Direct
+  Proxy -- "Yes" --> AsxProxy --> Direct
 ```
 
 ## Core Terms
@@ -30,28 +37,39 @@ Backend
 
 Provider and profile are related like this:
 
-```text
-Provider: codex
-  Profile: personal.codex
-  Profile: work.codex
+```mermaid
+flowchart TD
+  Codex["Provider: codex"]
+  CodexPersonal["Profile: personal.codex"]
+  CodexWork["Profile: work.codex"]
 
-Provider: zai
-  Profile: personal.zai
+  Zai["Provider: zai"]
+  ZaiPersonal["Profile: personal.zai"]
 
-Provider: claude
-  Profile: personal.claude
-  Profile: max.claude
+  Claude["Provider: claude"]
+  ClaudePersonal["Profile: personal.claude"]
+  ClaudeMax["Profile: max.claude"]
+
+  Codex --> CodexPersonal
+  Codex --> CodexWork
+  Zai --> ZaiPersonal
+  Claude --> ClaudePersonal
+  Claude --> ClaudeMax
 ```
 
 The profile chooses the credential. The optional target argument chooses the launched agent.
 
-```text
-asx e personal.zai codex
-      ^ profile      ^ target agent
+```mermaid
+flowchart LR
+  Cmd["asx e personal.zai codex"]
+  ProfileArg["profile argument<br/>personal.zai"]
+  TargetArg["target argument<br/>codex"]
+  ProfileProvider["profile provider<br/>zai"]
+  AgentProvider["agent provider<br/>codex"]
+  BackendProvider["backend provider<br/>zai"]
 
-profile provider = zai
-agent provider   = codex
-backend provider = zai
+  Cmd --> ProfileArg --> ProfileProvider --> BackendProvider
+  Cmd --> TargetArg --> AgentProvider
 ```
 
 ## Main Layers
@@ -77,14 +95,16 @@ ASX keeps secrets and metadata separate.
 - `src/storage/secure-store.ts` stores credentials by `${provider}:${name}`.
 - `src/storage/account-store.ts` stores account metadata, labels, email, and active markers.
 
-```text
-ASX config dir
-  accounts.json
-    - provider, name, label, email, addedAt
-  .active.json
-    - provider -> active profile name
-  vault.json
-    - "provider:name" -> raw credential
+```mermaid
+flowchart TD
+  Config["ASX config dir"]
+  Accounts["accounts.json<br/>provider, name, label, email, addedAt"]
+  Active[".active.json<br/>provider -> active profile name"]
+  VaultFile["vault.json<br/>provider:name -> raw credential"]
+
+  Config --> Accounts
+  Config --> Active
+  Config --> VaultFile
 ```
 
 The credential vault is a `0600` file by default:
@@ -184,20 +204,15 @@ Agent runtime isolation is controlled through provider home env vars:
 
 When profile provider and agent provider are the same, ASX runs the native tool with that profile's credential.
 
-```text
-asx e personal.codex
+```mermaid
+flowchart TD
+  Cmd["asx e personal.codex"]
+  Vault["ASX vault<br/>codex:personal.codex"]
+  Runtime["isolated CODEX_HOME<br/>auth.json"]
+  Agent["codex CLI"]
+  Upstream["Codex upstream"]
 
-ASX vault
-  "codex:personal.codex"
-        |
-        v
-isolated CODEX_HOME/auth.json
-        |
-        v
-codex CLI
-        |
-        v
-Codex upstream
+  Cmd --> Vault --> Runtime --> Agent --> Upstream
 ```
 
 No ASX Proxy is needed because the launched agent already speaks the backend provider's native wire format.
@@ -206,30 +221,20 @@ No ASX Proxy is needed because the launched agent already speaks the backend pro
 
 When profile provider and agent provider differ, ASX starts a local proxy.
 
-```text
-asx e personal.zai codex
+```mermaid
+flowchart TD
+  Cmd["asx e personal.zai codex"]
+  Vault["ASX vault<br/>zai:personal.zai"]
+  BackendCred["ASX Proxy backend credential"]
+  Config["isolated CODEX_HOME/config.toml<br/>base_url = http://127.0.0.1:port/v1<br/>model_provider = asx-proxy<br/>model = glm-5.2"]
+  Agent["codex CLI"]
+  Proxy["ASX Proxy"]
+  Upstream["ZAI upstream"]
 
-ASX vault
-  "zai:personal.zai"
-        |
-        v
-ASX Proxy backend credential
-
-isolated CODEX_HOME/config.toml
-  base_url = http://127.0.0.1:<port>/v1
-  model_provider = "asx-proxy"
-  model = "glm-5.2"
-        |
-        v
-codex CLI
-        |
-        |  Codex Responses wire
-        v
-ASX Proxy
-        |
-        |  ZAI OpenAI-compatible chat completions wire
-        v
-ZAI upstream
+  Cmd --> Vault --> BackendCred --> Proxy
+  Cmd --> Config --> Agent
+  Agent -- "Codex Responses wire" --> Proxy
+  Proxy -- "ZAI OpenAI-compatible chat completions wire" --> Upstream
 ```
 
 In this mode:
@@ -245,32 +250,21 @@ ASX Proxy is a local in-process HTTP proxy used when the launched agent wire dif
 
 The proxy shape is:
 
-```text
-native agent
-  |
-  | provider-native request
-  v
-agent adapter
-  |
-  | COMMON request
-  v
-backend adapter
-  |
-  | upstream provider request
-  v
-provider upstream
-  |
-  | upstream stream
-  v
-backend adapter
-  |
-  | COMMON events
-  v
-agent adapter
-  |
-  | provider-native response stream
-  v
-native agent
+```mermaid
+flowchart LR
+  Agent["native agent"]
+  AgentAdapter["agent adapter"]
+  CommonReq["COMMON request"]
+  BackendAdapter["backend adapter"]
+  Upstream["provider upstream"]
+  CommonEvents["COMMON events"]
+
+  Agent -- "provider-native request" --> AgentAdapter
+  AgentAdapter --> CommonReq --> BackendAdapter
+  BackendAdapter -- "upstream provider request" --> Upstream
+  Upstream -- "upstream stream" --> BackendAdapter
+  BackendAdapter --> CommonEvents --> AgentAdapter
+  AgentAdapter -- "provider-native response stream" --> Agent
 ```
 
 Files:
@@ -283,14 +277,32 @@ Files:
 
 `GET /models` and `GET /v1/models` return the backend model choices. This lets Codex and Grok display backend-specific model choices during cross-provider runs.
 
-### Proxy Adapter Matrix
+### Proxy Adapter Composition
 
-```text
-             incoming agent wire       outgoing backend wire
-codex        Responses API             ChatGPT Codex Responses API
-claude       Anthropic Messages API     Anthropic Messages API
-grok         Chat Completions API       Grok CLI cloud API
-zai          n/a                        ZAI Chat Completions API
+```mermaid
+flowchart LR
+  subgraph Agents["Agent adapters"]
+    CodexAgent["codex<br/>Responses API"]
+    ClaudeAgent["claude<br/>Anthropic Messages API"]
+    GrokAgent["grok<br/>Chat Completions API"]
+  end
+
+  Common["COMMON request/events"]
+
+  subgraph Backends["Backend adapters"]
+    CodexBackend["codex<br/>ChatGPT Codex Responses API"]
+    ClaudeBackend["claude<br/>Anthropic Messages API"]
+    GrokBackend["grok<br/>Grok CLI cloud API"]
+    ZaiBackend["zai<br/>ZAI Chat Completions API"]
+  end
+
+  CodexAgent --> Common
+  ClaudeAgent --> Common
+  GrokAgent --> Common
+  Common --> CodexBackend
+  Common --> ClaudeBackend
+  Common --> GrokBackend
+  Common --> ZaiBackend
 ```
 
 `zai` is backend-only because ASX does not launch a native ZAI agent.
