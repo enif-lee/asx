@@ -41,6 +41,17 @@ function fakeCodexAuth(): string {
   return JSON.stringify({ OPENAI_API_KEY: null, tokens: { id_token: jwt, access_token: jwt, refresh_token: 'asx-proxy-refresh', account_id: 'asx-proxy' }, last_refresh: new Date().toISOString() });
 }
 
+// Per-agent facts: native binary, the env var + temp subdir + auth file used to isolate it,
+// full-access bypass flags, and the boot stub written when running under a *cross* profile
+// (so the binary skips its own login). stub=null → no file needed (grok routes via config.toml).
+interface AgentSpec { bin: string; homeEnv: string; sub: string; file: string; bypass: string[]; stub: (() => string) | null; }
+const AGENT_SPEC: Record<string, AgentSpec> = {
+  codex: { bin: 'codex', homeEnv: 'CODEX_HOME', sub: 'codex', file: 'auth.json', bypass: ['--dangerously-bypass-approvals-and-sandbox', '--dangerously-bypass-hook-trust'], stub: fakeCodexAuth },
+  claude: { bin: 'claude', homeEnv: 'CLAUDE_CONFIG_DIR', sub: 'claude', file: '.credentials.json', bypass: ['--dangerously-skip-permissions'], stub: () => JSON.stringify({ claudeAiOauth: { accessToken: 'asx-proxy-dummy' } }) },
+  grok: { bin: 'grok', homeEnv: 'GROK_HOME', sub: 'grok', file: 'auth.json', bypass: ['--dangerously-skip-permissions'], stub: null },
+};
+const agentSpec = (provider: string): AgentSpec | undefined => AGENT_SPEC[provider.includes('claude') ? 'claude' : provider];
+
 // Refresh the stored credential if the adapter reports it expired. Best-effort; used
 // automatically before exec and `ls -u`. Returns true if the credential is usable after.
 async function ensureFresh(provider: string, name: string, verbose = false): Promise<boolean> {
@@ -494,16 +505,7 @@ program
   });
 
 function getBypassFlags(provider: string): string[] {
-  if (provider === 'claude' || provider === 'claude-code') {
-    return ['--dangerously-skip-permissions'];
-  }
-  if (provider === 'codex') {
-    return ['--dangerously-bypass-approvals-and-sandbox', '--dangerously-bypass-hook-trust'];
-  }
-  if (provider === 'grok') {
-    return ['--dangerously-skip-permissions'];
-  }
-  return [];
+  return agentSpec(provider)?.bypass ?? [];
 }
 
 program
@@ -546,15 +548,12 @@ program
     const agentProvider = specifiedProvider || profileProvider;
     const isCross = !!specifiedProvider && normalizeProvider(specifiedProvider) !== normalizeProvider(profileProvider);
 
-    const nativeBin = agentProvider.includes('claude') ? 'claude'
-      : agentProvider === 'codex' ? 'codex'
-      : agentProvider === 'grok' ? 'grok'
-      : null;
-
-    if (!nativeBin) {
+    const spec = agentSpec(agentProvider);
+    if (!spec) {
       console.error(chalk.red(`Exec is not supported for provider '${agentProvider}'.`));
       process.exit(1);
     }
+    const nativeBin = spec.bin;
 
     const isCurrent = getActive(profileProvider) === accountName;
 
@@ -588,69 +587,23 @@ program
         tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), `asx-${accountName.replace(/[^a-zA-Z0-9_-]/g, '_')}-`));
         fs.chmodSync(tmpDir, 0o700);
 
+        // Isolate the agent binary in tmpDir via its home env var.
+        const d = path.join(tmpDir, spec.sub);
+        fs.mkdirSync(d, { recursive: true });
+        env[spec.homeEnv] = d;
+
         if (!isCross) {
-          // Same provider: we can safely copy the profile's credential into the agent's temp dir
+          // Same provider: copy the profile's real credential into the agent's temp home.
           const cred = await getSecret(profileProvider, accountName);
           if (!cred) {
             console.error(chalk.red(`No stored credential for ${profileProvider}/${accountName}`));
             process.exit(1);
           }
-
-          if (agentProvider === 'codex') {
-            const d = path.join(tmpDir, 'codex');
-            fs.mkdirSync(d, { recursive: true });
-            fs.writeFileSync(path.join(d, 'auth.json'), cred, { mode: 0o600 });
-            env.CODEX_HOME = d;
-          } else if (agentProvider.includes('claude')) {
-            const d = path.join(tmpDir, 'claude');
-            fs.mkdirSync(d, { recursive: true });
-            fs.writeFileSync(path.join(d, '.credentials.json'), cred, { mode: 0o600 });
-            env.CLAUDE_CONFIG_DIR = d;
-          } else if (agentProvider === 'grok') {
-            const d = path.join(tmpDir, 'grok');
-            fs.mkdirSync(d, { recursive: true });
-            fs.writeFileSync(path.join(d, 'auth.json'), cred, { mode: 0o600 });
-            env.GROK_HOME = d;
-          }
-        } else {
-          // Cross case: create temp dir for the *agent* (to isolate its local state).
-          // Seed a minimal "logged in" state for the agent binary so it doesn't force
-          // its own login/welcome screen. The proxy will handle the real backend auth
-          // using the profile's credential.
-          if (agentProvider === 'codex') {
-            const d = path.join(tmpDir, 'codex');
-            fs.mkdirSync(d, { recursive: true });
-            env.CODEX_HOME = d;
-            // Seed a Codex auth.json so the binary boots without a login screen. It validates
-            // the id_token as a structurally valid JWT, so a bare string won't do — forge a
-            // well-formed (unsigned) JWT with far-future expiry. Real backend auth is the proxy's.
-            let codexAuth: string;
-            if (profileProvider === 'codex') {
-              codexAuth = (await getSecret(profileProvider, accountName)) || fakeCodexAuth();
-            } else {
-              codexAuth = fakeCodexAuth();
-            }
-            try {
-              fs.writeFileSync(path.join(d, 'auth.json'), codexAuth, { mode: 0o600 });
-            } catch {}
-          } else if (agentProvider.includes('claude')) {
-            const d = path.join(tmpDir, 'claude');
-            fs.mkdirSync(d, { recursive: true });
-            env.CLAUDE_CONFIG_DIR = d;
-            // Seed a minimal credentials so Claude Code skips full sign-in when using gateway token.
-            const dummyCred = JSON.stringify({
-              claudeAiOauth: { accessToken: 'asx-proxy-dummy' }
-            });
-            try {
-              fs.writeFileSync(path.join(d, '.credentials.json'), dummyCred, { mode: 0o600 });
-            } catch {}
-          } else if (agentProvider === 'grok') {
-            // No auth.json needed: injected config.toml uses a custom model with a dummy api_key,
-            // so headless `grok -p` skips login entirely and routes to the proxy. (verified)
-            const d = path.join(tmpDir, 'grok');
-            fs.mkdirSync(d, { recursive: true });
-            env.GROK_HOME = d;
-          }
+          fs.writeFileSync(path.join(d, spec.file), cred, { mode: 0o600 });
+        } else if (spec.stub) {
+          // Cross: seed a boot stub so the binary skips its own login (real backend auth is
+          // the proxy's). grok has stub=null — its injected config.toml handles auth instead.
+          try { fs.writeFileSync(path.join(d, spec.file), spec.stub(), { mode: 0o600 }); } catch {}
         }
       }
 
