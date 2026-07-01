@@ -1,4 +1,6 @@
 import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
 import { execSync } from 'node:child_process';
 import { setSecret, getSecret } from '../storage/secure-store.js';
 import { addAccount } from '../storage/account-store.js';
@@ -27,13 +29,11 @@ function extractCodexEmail(authJson: string): string | undefined {
 
 const P = 'codex';
 
-function readCodexAuth(): string | null {
-  const p = getCodexAuthPath();
+function readCodexAuth(p = getCodexAuthPath()): string | null {
   return fs.existsSync(p) ? fs.readFileSync(p, 'utf8') : null;
 }
 
-function writeCodexAuth(raw: string) {
-  const p = getCodexAuthPath();
+function writeCodexAuth(raw: string, p = getCodexAuthPath()) {
   ensureDirFor(p);
   fs.writeFileSync(p, raw);
   try { fs.chmodSync(p, 0o600); } catch {}
@@ -50,20 +50,24 @@ function extractPlanFromIdToken(idToken: string) {
 }
 
 async function attemptCodexNativeRefresh(accountName: string): Promise<boolean> {
+  let tmpDir: string | null = null;
   try {
     const stored = await getSecret(P, accountName);
     if (!stored) return false;
 
-    // Inject the snapshot (possibly with expired access token) into native storage.
-    // The native `codex` CLI will then load it and run its own refresh logic using the refresh_token.
-    writeCodexAuth(stored);
+    // Refresh inside a private CODEX_HOME so native Codex never mutates the shared ~/.codex.
+    tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), `asx-codex-refresh-${accountName.replace(/[^a-zA-Z0-9_-]/g, '_')}-`));
+    const authPath = path.join(tmpDir, 'auth.json');
+    writeCodexAuth(stored, authPath);
+    const env = { ...process.env, CODEX_HOME: tmpDir };
 
     // Run a native command that exercises auth loading + health checks.
     // `codex doctor` (with --summary for brevity) explicitly validates auth.credentials and will
     // cause Codex to perform its internal refresh using the refresh_token if the access token
-    // is expired or near expiry, then it writes the fresh tokens back to ~/.codex/auth.json.
+    // is expired or near expiry, then it writes the fresh tokens back to the temp auth.json.
     try {
       execSync('codex doctor --summary', {
+        env,
         stdio: 'ignore',
         timeout: 20000,
       });
@@ -71,21 +75,26 @@ async function attemptCodexNativeRefresh(accountName: string): Promise<boolean> 
       // Non-fatal. Even if doctor reports issues, refresh may have occurred.
       // As a fallback also try the lighter status command.
       try {
-        execSync('codex login status', { stdio: 'ignore', timeout: 8000 });
+        execSync('codex login status', { env, stdio: 'ignore', timeout: 8000 });
       } catch {}
     }
 
-    // Re-snapshot whatever is now in the native file (should contain refreshed tokens).
-    const fresh = readCodexAuth();
+    // Re-snapshot whatever is now in the temp file (should contain refreshed tokens).
+    const fresh = readCodexAuth(authPath);
     if (!fresh) return false;
 
     const email = extractCodexEmail(fresh);
     await setSecret(P, accountName, fresh);
     addAccount({ provider: P, name: accountName, label: accountName, email });
+    if (readCodexAuth() === stored) writeCodexAuth(fresh);
 
     return true;
   } catch {
     return false;
+  } finally {
+    if (tmpDir) {
+      try { fs.rmSync(tmpDir, { recursive: true, force: true }); } catch {}
+    }
   }
 }
 

@@ -17,7 +17,7 @@ Store credentials securely in a single OS Keychain vault and switch between acco
   - `-b, --bypass`: Automatically injects full-access bypass flags for the provider:
     - claude/grok: `--dangerously-skip-permissions`
     - codex: `--dangerously-bypass-approvals-and-sandbox` + `--dangerously-bypass-hook-trust`
-- **Convenient Load + Login**: `asx load` snapshots the currently active credential. `asx login <provider>` saves the current session without expiring it, clears only the local state, runs the native login flow, then loads the new account. This enables clean multi-account use without token revocation.
+- **Convenient Load + Login**: `asx load` snapshots the currently active credential. `asx login claude` uses Claude's native access/refresh token flow inside an isolated `CLAUDE_CONFIG_DIR`; add `--long-lived` to store a `CLAUDE_CODE_OAUTH_TOKEN` instead.
 - **Provider-less Commands**: `asx exec <name>`, `asx remove <name>` work without provider (name is globally unique or resolved).
 - **Email Tracking**: Stores associated email when loading accounts.
 - **Cross-platform**: Strong support on macOS, works on Linux/Windows.
@@ -52,7 +52,8 @@ asx load codex personal
 
 # Better multi-account flow (saves existing without expiry)
 asx login codex work
-asx login claude
+asx login claude work
+asx login claude personal --long-lived
 
 # Switch
 asx switch claude personal
@@ -81,7 +82,7 @@ asx e ed.claude xai "explain with grok"
 |--------------------------|-------------|
 | `asx list [provider] [-u/-d]` | List accounts. `-u/--usage` shows live quota bars. `-d/--debug` dumps stored credentials. Marks the live system credential with `(current in system)`. |
 | `asx load [provider] [name]` | Snapshot the currently active credential(s) from the provider into asx. Auto-generates name like `ed.claude` / `ed.codex` if omitted. |
-| `asx login <provider> [name]` | Save current session (non-destructive), clear local only, launch native login, then load the new one. |
+| `asx login <provider> [name] [--long-lived]` | Login and store a new account. Claude defaults to native access/refresh tokens in isolated `CLAUDE_CONFIG_DIR`; `--long-lived` uses `claude setup-token`. |
 | `asx rename <from> <to>` | Rename an account (updates vault + metadata + active markers). |
 | `asx switch <provider> <name>` (alias: `s`) | Switch the active credential for a provider. |
 | `asx status [provider]` | Show asx-tracked active account(s). |
@@ -92,7 +93,7 @@ asx e ed.claude xai "explain with grok"
 
 | Provider     | Identifier     | Auth                                           | Usage                     |
 |--------------|----------------|------------------------------------------------|---------------------------|
-| Claude Code  | `claude`       | Keychain (macOS) or `~/.claude/.credentials.json` | 5h / 7d bars (accurate)   |
+| Claude Code  | `claude`       | Native access/refresh tokens in isolated `CLAUDE_CONFIG_DIR`; optional long-lived `CLAUDE_CODE_OAUTH_TOKEN` | 5h / 7d bars (accurate)   |
 | Codex        | `codex`        | `~/.codex/auth.json` (respects `$CODEX_HOME`)     | 5h / 7d windows           |
 | Grok / xAI   | `grok`         | `~/.grok/auth.json` (respects `$GROK_HOME`)       | Credits + rate limits     |
 | Z.AI         | `zai`          | Environment variable                              | Basic key info            |
@@ -104,11 +105,13 @@ More providers can be added easily via the adapter pattern.
 
 - Everything is stored in **one** secure vault item (`service=asx`, `account=vault`).
 - `asx load` (or `asx login`) reads the currently active credential from the provider's storage (keychain / `~/.codex/auth.json` / `~/.grok/auth.json` etc.) and saves it in the vault (with email).
-- `asx login <provider>` first snapshots the existing session (without calling logout), clears only the *local* credential, then runs the native login flow and loads the new one. This prevents token expiry on the previous account.
-- `switch` (or `s`) writes the chosen credential back to the provider's native location so the native CLI sees it.
+- `asx login claude [name]` runs `claude auth login` with a profile-scoped `CLAUDE_CONFIG_DIR`, then stores the resulting access/refresh credential in the asx vault without touching Claude's global Keychain credential.
+- `asx login claude [name] --long-lived` runs `claude setup-token`, asks for the long-lived token, and stores it in the asx vault for `CLAUDE_CODE_OAUTH_TOKEN` execution.
+- `asx login <provider>` for other providers first snapshots the existing session (without calling logout), clears only the *local* credential, then runs the native login flow and loads the new one.
+- `switch` (or `s`) writes file/keychain credentials back to the provider's native location. Claude long-lived token profiles only update asx's active marker; `exec` injects `CLAUDE_CODE_OAUTH_TOKEN`.
 - `exec` / `e` runs the native CLI **isolated** from other terminals:
-  - If the profile is already the current asx active one → execute the native binary directly.
-  - Otherwise → write a copy of the credential into a temp directory, set `CODEX_HOME` / `CLAUDE_CONFIG_DIR` / `GROK_HOME` etc., spawn the native tool, and delete the temp dir on exit.
+  - Claude native access/refresh profiles use a stable profile-scoped runtime `CLAUDE_CONFIG_DIR` so concurrent sessions share Claude's own credential file.
+  - Other isolated runs write a copy of the credential into a temp directory, set `CODEX_HOME` / `CLAUDE_CONFIG_DIR` / `GROK_HOME` etc., spawn the native tool, and delete the temp dir on exit.
   - `-b / --bypass` automatically injects the appropriate full-access flags for the provider.
 - `list` (and `list -u`) detects the *live* credential currently loaded in the system (keychain/auth files) and annotates the matching stored account with `(current in system)`.
 - Usage bars (via `list -u`) use the same live mechanisms as [openusage](https://github.com/janekbaraniewski/openusage) where possible.

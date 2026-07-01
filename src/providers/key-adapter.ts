@@ -1,15 +1,14 @@
 import fs from 'node:fs';
-import os from 'node:os';
-import path from 'node:path';
 import { setSecret, getSecret } from '../storage/secure-store.js';
 import { addAccount } from '../storage/account-store.js';
 import { renderBar } from '../utils/bar.js';
 import { decodeJwtClaims } from '../utils/jwt.js';
+import { getGrokAuthPath } from '../utils/platform.js';
 import type { ProviderAdapter } from './base.js';
 
 function getGrokAuth(): any | undefined {
   try {
-    const grokPath = path.join(os.homedir(), '.grok', 'auth.json');
+    const grokPath = getGrokAuthPath();
     if (fs.existsSync(grokPath)) {
       const data = JSON.parse(fs.readFileSync(grokPath, 'utf8'));
       const entry = Object.values(data)[0] as any;

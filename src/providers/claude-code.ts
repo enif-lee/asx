@@ -1,9 +1,7 @@
-import { execSync } from 'node:child_process';
+import { execFileSync, execSync } from 'node:child_process';
 import fs from 'node:fs';
-import path from 'node:path';
-import os from 'node:os';
 import { setSecret, getSecret } from '../storage/secure-store.js';
-import { addAccount, getAccount } from '../storage/account-store.js';
+import { addAccount } from '../storage/account-store.js';
 import { getClaudeCredentialsPath, getPlatform, ensureDirFor } from '../utils/platform.js';
 import type { ProviderAdapter } from './base.js';
 import { renderBar, formatReset } from '../utils/bar.js';
@@ -12,31 +10,62 @@ import { renderBar, formatReset } from '../utils/bar.js';
 
 
 
+const PROVIDER = 'claude';
+// Claude Code's public OAuth client id (used for the refresh_token grant).
+const CLAUDE_OAUTH_CLIENT_ID = '9d1c250a-e61b-44d9-88ed-5944d1962f5e';
+const LONG_LIVED_TOKEN_TYPE = 'claude-code-oauth-token';
+
+export function normalizeClaudeCodeOAuthToken(input: string): string {
+  let token = input.trim();
+  const m = token.match(/^(?:export\s+)?CLAUDE_CODE_OAUTH_TOKEN=(.+)$/s);
+  if (m) token = m[1].trim();
+  if ((token.startsWith('"') && token.endsWith('"')) || (token.startsWith("'") && token.endsWith("'"))) {
+    token = token.slice(1, -1);
+  }
+  return token.trim();
+}
+
+function makeLongLivedTokenCredential(token: string): string {
+  return JSON.stringify({ type: LONG_LIVED_TOKEN_TYPE, token: normalizeClaudeCodeOAuthToken(token) });
+}
+
+export function getClaudeCodeOAuthToken(raw: string): string | null {
+  try {
+    const parsed = JSON.parse(raw);
+    if (parsed?.type === LONG_LIVED_TOKEN_TYPE && typeof parsed.token === 'string') return normalizeClaudeCodeOAuthToken(parsed.token);
+    return parsed?.claudeAiOauth?.accessToken || parsed?.accessToken || null;
+  } catch {
+    return raw || null;
+  }
+}
+
+export function isClaudeCodeLongLivedToken(raw: string): boolean {
+  try {
+    return JSON.parse(raw)?.type === LONG_LIVED_TOKEN_TYPE;
+  } catch {
+    return false;
+  }
+}
+
 async function extractClaudeEmail(credJson: string): Promise<string | undefined> {
   try {
-    const parsed = JSON.parse(credJson);
-    const token = parsed?.claudeAiOauth?.accessToken || parsed?.accessToken;
+    const token = getClaudeCodeOAuthToken(credJson);
     if (!token) return undefined;
 
-    const res = await fetch('https://api.anthropic.com/api/oauth/profile', {
-      headers: {
-        'Authorization': `Bearer ${token}`,
-        'anthropic-version': '2023-06-01',
-      },
-    });
-    if (!res.ok) return undefined;
-    const data: any = await res.json();
+    const { status, data } = await fetchAnthropicJson('/api/oauth/profile', token);
+    if (status < 200 || status >= 300 || !data) return undefined;
     return data?.email_address || data?.email || data?.account?.email_address || data?.account?.email || data?.email;
   } catch {
     return undefined;
   }
 }
 
-const PROVIDER = 'claude';
-// Claude Code's public OAuth client id (used for the refresh_token grant).
-const CLAUDE_OAUTH_CLIENT_ID = '9d1c250a-e61b-44d9-88ed-5944d1962f5e';
-
 function readCurrentCredentials(): string | null {
+  const filePath = getClaudeCredentialsPath();
+  if (process.env.CLAUDE_CONFIG_DIR && fs.existsSync(filePath)) {
+    try { return fs.readFileSync(filePath, 'utf8'); } catch { return null; }
+  }
+
   const plat = getPlatform();
   if (plat === 'darwin') {
     try {
@@ -54,7 +83,7 @@ function readCurrentCredentials(): string | null {
     return null;
   }
   // Linux / Win file
-  const p = getClaudeCredentialsPath();
+  const p = filePath;
   if (fs.existsSync(p)) {
     try { return fs.readFileSync(p, 'utf8'); } catch { return null; }
   }
@@ -86,17 +115,43 @@ function writeActiveCredentials(raw: string): void {
 // Returns { status, data }. status 0 = network error. Non-2xx (esp. 401) means the
 // stored token is expired/invalid — the caller must not fall back to stale local data.
 async function fetchOAuthUsage(token: string): Promise<{ status: number; data: any | null }> {
+  return fetchAnthropicJson('/api/oauth/usage', token);
+}
+
+async function fetchAnthropicJson(path: string, token: string): Promise<{ status: number; data: any | null }> {
+  const headers = {
+    'Authorization': `Bearer ${token}`,
+    'anthropic-version': '2023-06-01',
+    'anthropic-beta': 'oauth-2025-04-20',
+  };
   try {
-    const res = await fetch('https://api.anthropic.com/api/oauth/usage', {
-      headers: {
-        'Authorization': `Bearer ${token}`,
-        'anthropic-version': '2023-06-01',
-        // Some clients include this beta header; it is optional but harmless
-        'anthropic-beta': 'oauth-2025-04-20',
-      },
-    });
+    const res = await fetch(`https://api.anthropic.com${path}`, { headers });
     if (!res.ok) return { status: res.status, data: null };
     return { status: res.status, data: await res.json() };
+  } catch {
+    return fetchAnthropicJsonWithCurl(path, headers);
+  }
+}
+
+function fetchAnthropicJsonWithCurl(path: string, headers: Record<string, string>): { status: number; data: any | null } {
+  try {
+    const config = [
+      'silent',
+      'show-error',
+      `url = ${JSON.stringify(`https://api.anthropic.com${path}`)}`,
+      ...Object.entries(headers).map(([k, v]) => `header = ${JSON.stringify(`${k}: ${v}`)}`),
+    ].join('\n');
+    const out = execFileSync('curl', ['--config', '-', '--write-out', '\nASX_HTTP_STATUS:%{http_code}'], {
+      input: config,
+      encoding: 'utf8',
+      stdio: ['pipe', 'pipe', 'ignore'],
+      timeout: 15_000,
+    });
+    const m = out.match(/\nASX_HTTP_STATUS:(\d{3})\s*$/);
+    if (!m) return { status: 0, data: null };
+    const body = out.slice(0, m.index).trim();
+    const status = Number(m[1]);
+    return { status, data: status >= 200 && status < 300 && body ? JSON.parse(body) : null };
   } catch {
     return { status: 0, data: null };
   }
@@ -106,6 +161,10 @@ export const claudeCodeAdapter: ProviderAdapter = {
   name: PROVIDER,
 
   async loadCurrent(accountName: string, label?: string) {
+    if (process.env.CLAUDE_CODE_OAUTH_TOKEN) {
+      await this.loadLongLivedToken?.(accountName, process.env.CLAUDE_CODE_OAUTH_TOKEN);
+      return;
+    }
     const current = readCurrentCredentials();
     if (!current) {
       throw new Error('No active Claude Code credentials found. Login with `claude` (or `claude auth login`) first, then run `asx load claude <name>`.');
@@ -124,17 +183,23 @@ export const claudeCodeAdapter: ProviderAdapter = {
   async switchTo(accountName: string) {
     const stored = await getSecret(PROVIDER, accountName);
     if (!stored) throw new Error(`No credentials stored for ${PROVIDER}/${accountName}. Use 'asx load' first.`);
-    writeActiveCredentials(stored);
+    if (!isClaudeCodeLongLivedToken(stored)) writeActiveCredentials(stored);
     // update lightweight active marker
     const { setActive } = await import('../storage/account-store.js');
     setActive(PROVIDER, accountName);
   },
 
   async getCurrentCredential() {
+    if (process.env.CLAUDE_CODE_OAUTH_TOKEN) {
+      return makeLongLivedTokenCredential(process.env.CLAUDE_CODE_OAUTH_TOKEN);
+    }
     return readCurrentCredentials();
   },
 
   async getCurrentEmail() {
+    if (process.env.CLAUDE_CODE_OAUTH_TOKEN) {
+      return extractClaudeEmail(makeLongLivedTokenCredential(process.env.CLAUDE_CODE_OAUTH_TOKEN));
+    }
     const current = readCurrentCredentials();
     if (!current) return undefined;
     return extractClaudeEmail(current);
@@ -165,6 +230,7 @@ export const claudeCodeAdapter: ProviderAdapter = {
   async isExpired(accountName?: string) {
     const raw = await getSecret(PROVIDER, accountName || '');
     if (!raw) return false;
+    if (isClaudeCodeLongLivedToken(raw)) return false;
     try {
       const o = JSON.parse(raw).claudeAiOauth || {};
       return typeof o.expiresAt === 'number' && o.expiresAt < Date.now() + 60_000;
@@ -174,6 +240,7 @@ export const claudeCodeAdapter: ProviderAdapter = {
   async refresh(accountName?: string) {
     const raw = await getSecret(PROVIDER, accountName || '');
     if (!raw) return { ok: false, message: 'no stored credential' };
+    if (isClaudeCodeLongLivedToken(raw)) return { ok: true, message: 'long-lived token does not need refresh' };
     let o: any;
     try { o = JSON.parse(raw).claudeAiOauth; } catch { return { ok: false, message: 'stored credential is not valid JSON' }; }
     if (!o?.refreshToken) return { ok: false, message: 'no refresh token stored', needsRelogin: true };
@@ -210,22 +277,20 @@ export const claudeCodeAdapter: ProviderAdapter = {
       if (!raw) return 'No stored credential for this account.';
 
       const data = JSON.parse(raw);
+      const isLongLived = data?.type === LONG_LIVED_TOKEN_TYPE;
       const oauth = data?.claudeAiOauth || {};
       const tier = oauth.rateLimitTier || 'unknown';
       const subType = oauth.subscriptionType || 'unknown';
 
       const namePart = accountName ? ` (${accountName})` : '';
 
-      const token = oauth.accessToken;
-      let baseInfo = `subscription=${subType} tier=${tier}${namePart}`;
+      const token = getClaudeCodeOAuthToken(raw);
+      let baseInfo = isLongLived ? `long-lived token${namePart}` : `subscription=${subType} tier=${tier}${namePart}`;
 
       if (token) {
         try {
-          const res = await fetch('https://api.anthropic.com/api/oauth/profile', {
-            headers: { 'Authorization': `Bearer ${token}`, 'anthropic-version': '2023-06-01' },
-          });
-          if (res.ok) {
-            const prof: any = await res.json();
+          const { status, data: prof } = await fetchAnthropicJson('/api/oauth/profile', token);
+          if (status >= 200 && status < 300 && prof) {
             const org = prof.organization || {};
             const acc = prof.account || {};
             const orgType = org.organization_type || org.billing_type || '';
@@ -272,5 +337,12 @@ export const claudeCodeAdapter: ProviderAdapter = {
     } catch (e) {
       return 'Unable to read usage info from stored credential.';
     }
+  },
+
+  async loadLongLivedToken(accountName: string, token: string) {
+    const raw = makeLongLivedTokenCredential(token);
+    const email = await extractClaudeEmail(raw);
+    await setSecret(PROVIDER, accountName, raw);
+    addAccount({ provider: PROVIDER, name: accountName, label: accountName, email });
   },
 };

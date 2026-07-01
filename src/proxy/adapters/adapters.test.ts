@@ -83,6 +83,13 @@ describe('claude backend (Messages wire)', () => {
     expect(headers.authorization).toBe('Bearer tok');
     expect(url).toContain('beta=true');
   });
+  it('accepts long-lived token credentials', () => {
+    const { headers } = claudeBackend.buildRequest(
+      { model: 'claude-opus-4-8', messages: [], stream: true } as any,
+      JSON.stringify({ type: 'claude-code-oauth-token', token: 'long-token' }),
+    );
+    expect(headers.authorization).toBe('Bearer long-token');
+  });
 });
 
 describe('claude agent done-only', () => {

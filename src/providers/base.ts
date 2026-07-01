@@ -34,4 +34,8 @@ export interface ProviderAdapter {
   // Refresh (rotate) the stored credential for the account. Returns status + message.
   // needsRelogin = the refresh token is revoked/absent; caller may fall back to login flow.
   refresh?(accountName: string): Promise<{ ok: boolean; message: string; needsRelogin?: boolean }>;
+
+  // Store a manually issued provider token. Used by providers whose native login
+  // can mint a token that should stay in asx instead of native keychain/config.
+  loadLongLivedToken?(accountName: string, token: string): Promise<void>;
 }

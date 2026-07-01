@@ -63,6 +63,16 @@ export function getCodexAuthPath(): string {
   return path.join(getCodexHome(), 'auth.json');
 }
 
+// === Grok ===
+export function getGrokHome(): string {
+  if (process.env.GROK_HOME) return expandHome(process.env.GROK_HOME);
+  return getHomeDotDir('grok');
+}
+
+export function getGrokAuthPath(): string {
+  return path.join(getGrokHome(), 'auth.json');
+}
+
 
 // Generic helper to ensure parent dir
 export function ensureDirFor(filePath: string): void {

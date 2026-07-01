@@ -1,6 +1,5 @@
 import fs from 'node:fs';
 import path from 'node:path';
-import type { Platform } from '../utils/platform.js';
 import { dlog } from '../utils/log.js';
 import { backendChoices } from './models.js';
 

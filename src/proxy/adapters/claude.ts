@@ -47,7 +47,12 @@ const CLAUDE_CODE_ID = "You are Claude Code, Anthropic's official CLI for Claude
 export const claudeBackend: BackendAdapter = {
   buildRequest(req: CommonRequest, cred: string) {
     let token = cred;
-    try { const d = JSON.parse(cred); token = d?.claudeAiOauth?.accessToken || d?.accessToken || d?.apiKey || cred; } catch {}
+    try {
+      const d = JSON.parse(cred);
+      token = d?.type === 'claude-code-oauth-token'
+        ? d.token
+        : d?.claudeAiOauth?.accessToken || d?.accessToken || d?.apiKey || cred;
+    } catch {}
     const choice = resolveChoice('claude', req.model);
     // First system block must be the Claude Code identity; real instructions follow.
     const system = [{ type: 'text', text: CLAUDE_CODE_ID }];
