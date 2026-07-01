@@ -44,7 +44,7 @@ jobs:
           fi
 
       - run: npm ci
-      - run: npm version "${{ steps.version.outputs.version }}" --no-git-tag-version
+      - run: npm version "${{ steps.version.outputs.version }}" --no-git-tag-version --allow-same-version
       - run: npm test
       - run: npm run build
       - run: mkdir -p release
