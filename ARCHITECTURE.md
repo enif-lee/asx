@@ -11,6 +11,49 @@ provider native auth or API key
   -> optional ASX Proxy when agent wire and backend provider differ
 ```
 
+## Core Terms
+
+```text
+Provider
+  A credential/backend family such as claude, codex, grok, or zai.
+
+Profile
+  One named ASX account under a provider.
+  Stored as: provider + name + credential + metadata.
+
+Agent
+  The native CLI process ASX launches, such as codex, claude, or grok.
+
+Backend
+  The upstream provider that receives the final model request.
+```
+
+Provider and profile are related like this:
+
+```text
+Provider: codex
+  Profile: personal.codex
+  Profile: work.codex
+
+Provider: zai
+  Profile: personal.zai
+
+Provider: claude
+  Profile: personal.claude
+  Profile: max.claude
+```
+
+The profile chooses the credential. The optional target argument chooses the launched agent.
+
+```text
+asx e personal.zai codex
+      ^ profile      ^ target agent
+
+profile provider = zai
+agent provider   = codex
+backend provider = zai
+```
+
 ## Main Layers
 
 ### CLI
@@ -33,6 +76,16 @@ ASX keeps secrets and metadata separate.
 
 - `src/storage/secure-store.ts` stores credentials by `${provider}:${name}`.
 - `src/storage/account-store.ts` stores account metadata, labels, email, and active markers.
+
+```text
+ASX config dir
+  accounts.json
+    - provider, name, label, email, addedAt
+  .active.json
+    - provider -> active profile name
+  vault.json
+    - "provider:name" -> raw credential
+```
 
 The credential vault is a `0600` file by default:
 
@@ -127,6 +180,65 @@ Agent runtime isolation is controlled through provider home env vars:
 - Claude: `CLAUDE_CONFIG_DIR`
 - Grok: `GROK_HOME`
 
+### Same-Provider Execution
+
+When profile provider and agent provider are the same, ASX runs the native tool with that profile's credential.
+
+```text
+asx e personal.codex
+
+ASX vault
+  "codex:personal.codex"
+        |
+        v
+isolated CODEX_HOME/auth.json
+        |
+        v
+codex CLI
+        |
+        v
+Codex upstream
+```
+
+No ASX Proxy is needed because the launched agent already speaks the backend provider's native wire format.
+
+### Cross-Provider Execution
+
+When profile provider and agent provider differ, ASX starts a local proxy.
+
+```text
+asx e personal.zai codex
+
+ASX vault
+  "zai:personal.zai"
+        |
+        v
+ASX Proxy backend credential
+
+isolated CODEX_HOME/config.toml
+  base_url = http://127.0.0.1:<port>/v1
+  model_provider = "asx-proxy"
+  model = "glm-5.2"
+        |
+        v
+codex CLI
+        |
+        |  Codex Responses wire
+        v
+ASX Proxy
+        |
+        |  ZAI OpenAI-compatible chat completions wire
+        v
+ZAI upstream
+```
+
+In this mode:
+
+- The profile provider supplies the credential.
+- The target agent supplies the local UX and request wire format.
+- The proxy converts between the agent wire and backend wire.
+- The native agent never receives the real backend credential directly.
+
 ## ASX Proxy
 
 ASX Proxy is a local in-process HTTP proxy used when the launched agent wire differs from the stored backend credential.
@@ -135,10 +247,30 @@ The proxy shape is:
 
 ```text
 native agent
-  -> agent adapter parses request into COMMON
-  -> backend adapter builds upstream request
-  -> backend adapter parses upstream stream into COMMON
-  -> agent adapter formats response back to native wire
+  |
+  | provider-native request
+  v
+agent adapter
+  |
+  | COMMON request
+  v
+backend adapter
+  |
+  | upstream provider request
+  v
+provider upstream
+  |
+  | upstream stream
+  v
+backend adapter
+  |
+  | COMMON events
+  v
+agent adapter
+  |
+  | provider-native response stream
+  v
+native agent
 ```
 
 Files:
@@ -150,6 +282,18 @@ Files:
 - `src/proxy/adapters/*`: agent/backend wire adapters.
 
 `GET /models` and `GET /v1/models` return the backend model choices. This lets Codex and Grok display backend-specific model choices during cross-provider runs.
+
+### Proxy Adapter Matrix
+
+```text
+             incoming agent wire       outgoing backend wire
+codex        Responses API             ChatGPT Codex Responses API
+claude       Anthropic Messages API     Anthropic Messages API
+grok         Chat Completions API       Grok CLI cloud API
+zai          n/a                        ZAI Chat Completions API
+```
+
+`zai` is backend-only because ASX does not launch a native ZAI agent.
 
 ## Adding a Provider
 
