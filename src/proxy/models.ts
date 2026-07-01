@@ -18,7 +18,7 @@ function defaults(provider: string): BackendChoice[] {
     return ['high', 'medium', 'low', 'xhigh'].map((e) => ({ id: `gpt-5.5-${e}`, model: 'gpt-5.5', effort: e }));
   }
   if (p.includes('claude')) {
-    return ['claude-opus-4-6', 'claude-sonnet-4-6', 'claude-haiku-4-5'].map((m) => ({ id: m, model: m }));
+    return ['claude-opus-4-8', 'claude-sonnet-4-6', 'claude-haiku-4-5-20251001'].map((m) => ({ id: m, model: m }));
   }
   if (p === 'grok' || p === 'xai') {
     return ['grok-build'].map((m) => ({ id: m, model: m }));

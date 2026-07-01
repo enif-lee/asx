@@ -1,7 +1,8 @@
 // Claude (Anthropic Messages) adapter — both agent and backend sides.
-// ponytail: M2, UNTESTED. Wire shapes are the documented Anthropic Messages API.
-// M1 only exercises grok-agent + codex-backend; this exists so the hub is symmetric.
+// Verified: claude-agent + codex-backend, and codex/grok-agent + claude-backend all return
+// real answers. Backend uses Claude Code OAuth subscription inference (Bearer + claude-code beta).
 import type { AgentAdapter, BackendAdapter, CommonRequest, CommonEvent, CommonResponse, StreamCtx } from '../types.js';
+import { resolveChoice } from '../models.js';
 
 function toText(content: any): string {
   if (typeof content === 'string') return content;
@@ -48,20 +49,34 @@ export const claudeAgent: AgentAdapter = {
   },
 };
 
+// Claude Code OAuth requires the first system block to be exactly this identity line.
+const CLAUDE_CODE_ID = "You are Claude Code, Anthropic's official CLI for Claude.";
+
 export const claudeBackend: BackendAdapter = {
   buildRequest(req: CommonRequest, cred: string) {
-    let key = cred;
-    try { const d = JSON.parse(cred); key = d?.claudeAiOauth?.accessToken || d?.accessToken || d?.apiKey || cred; } catch {}
+    let token = cred;
+    try { const d = JSON.parse(cred); token = d?.claudeAiOauth?.accessToken || d?.accessToken || d?.apiKey || cred; } catch {}
+    const choice = resolveChoice('claude', req.model);
+    // First system block must be the Claude Code identity; real instructions follow.
+    const system = [{ type: 'text', text: CLAUDE_CODE_ID }];
+    if (req.system && req.system !== CLAUDE_CODE_ID) system.push({ type: 'text', text: req.system });
     const body = {
-      model: req.model.includes('claude') ? req.model : 'claude-sonnet-4-6',
-      system: req.system,
-      messages: req.messages.filter((m) => m.role === 'user' || m.role === 'assistant'),
+      model: choice.model,
+      system,
+      messages: req.messages.filter((m) => m.role === 'user' || m.role === 'assistant').map((m) => ({ role: m.role, content: m.content })),
       stream: true,
       max_tokens: req.maxTokens || 8192,
     };
     return {
-      url: 'https://api.anthropic.com/v1/messages',
-      headers: { 'content-type': 'application/json', 'anthropic-version': '2023-06-01', 'x-api-key': key },
+      // OAuth subscription inference (verified): Bearer token + claude-code beta, ?beta=true.
+      url: 'https://api.anthropic.com/v1/messages?beta=true',
+      headers: {
+        'content-type': 'application/json',
+        authorization: `Bearer ${token}`,
+        'anthropic-version': '2023-06-01',
+        'anthropic-beta': 'claude-code-20250219,oauth-2025-04-20',
+        'anthropic-dangerous-direct-browser-access': 'true',
+      },
       body: JSON.stringify(body),
     };
   },

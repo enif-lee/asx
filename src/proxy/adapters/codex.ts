@@ -21,16 +21,20 @@ function extractAuth(cred: string): { token: string; account: string } {
 export const codexBackend: BackendAdapter = {
   buildRequest(req: CommonRequest, cred: string) {
     const { token, account } = extractAuth(cred);
-    const input = req.messages.map((m) => ({
+    // Codex Responses forbids role=system in `input` — system goes only in `instructions`.
+    // Fold any system-role messages (some agents leave them in the array) into instructions.
+    const sys = [req.system, ...req.messages.filter((m) => m.role === 'system').map((m) => m.content)]
+      .filter(Boolean).join('\n');
+    const input = req.messages.filter((m) => m.role !== 'system').map((m) => ({
       type: 'message',
-      role: m.role === 'tool' ? 'user' : m.role,
+      role: m.role === 'assistant' ? 'assistant' : 'user',
       content: [{ type: m.role === 'assistant' ? 'output_text' : 'input_text', text: m.content }],
     }));
     // The agent sends the picked choice id (e.g. "gpt-5.5-high") as the model.
     const choice = resolveChoice('codex', req.model);
     const body = {
       model: choice.model,
-      instructions: req.system || 'You are a helpful assistant.',
+      instructions: sys || 'You are a helpful assistant.',
       input,
       stream: true,           // codex backend only streams; server accumulates if agent wanted non-stream
       store: false,
