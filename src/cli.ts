@@ -435,6 +435,60 @@ program
     process.exit(1);
   });
 
+program
+  .command('proxy <name> <frontend>')
+  .description('Start a standalone ASX proxy: <name> profile is the backend, <frontend> is the agent wire it speaks.\nPrints the endpoint URL and how to point the frontend agent at it. Runs until Ctrl+C.\nExample:\n  asx proxy ed.claude codex   # claude backend, codex-wire frontend')
+  .action(async (name: string, frontend: string) => {
+    const acct = getAccountByName(name);
+    if (!acct) { console.error(chalk.red(`No account found with name "${name}"`)); process.exit(1); }
+    const backendProvider = acct.provider;
+    const frontendProvider = (provIndex.normalizeProvider(frontend) || frontend.toLowerCase());
+    if (!['claude', 'codex', 'grok'].includes(frontendProvider)) {
+      console.error(chalk.red(`Unsupported frontend '${frontend}'. Use claude, codex, or grok.`)); process.exit(1);
+    }
+
+    // Refresh the backend credential if expired, then load it.
+    await ensureFresh(backendProvider, name, true);
+    const backendCred = await getSecret(backendProvider, name);
+    if (!backendCred) { console.error(chalk.red(`No stored credential for ${backendProvider}/${name}`)); process.exit(1); }
+
+    const proxyMod = await import('./proxy/index.js');
+    const { injectProxyEndpoint } = await import('./proxy/inject.js');
+    const proxyHandle = await proxyMod.startProxyForExec({
+      sourceProvider: frontendProvider,      // the wire the proxy accepts
+      targetProvider: backendProvider,       // the real backend (profile)
+      targetCredential: { apiKey: backendCred, raw: backendCred, type: backendProvider === 'claude' ? 'anthropic' : 'openai' } as any,
+    });
+    const url = proxyHandle.url!;
+
+    // Reuse the exec injection to produce the exact config/env the frontend needs, into a
+    // persistent dir, then tell the user which env vars to export to use it.
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), `asx-proxy-${frontendProvider}-`));
+    const injected: NodeJS.ProcessEnv = {};
+    await injectProxyEndpoint(frontendProvider, injected, url, dir, backendProvider);
+
+    console.log(chalk.green(`\nASX proxy running: ${chalk.bold(url)}`));
+    console.log(chalk.gray(`  backend  = ${backendProvider}/${name}`));
+    console.log(chalk.gray(`  frontend = ${frontendProvider} (wire this endpoint speaks)`));
+    console.log(`\n${chalk.bold('Point your ' + frontendProvider + ' agent at it:')}`);
+    for (const [k, v] of Object.entries(injected)) {
+      console.log(`  export ${k}=${JSON.stringify(v)}`);
+    }
+    if (frontendProvider === 'codex') console.log(chalk.gray(`  then run: codex   (uses the injected CODEX_HOME config)`));
+    else if (frontendProvider === 'grok') console.log(chalk.gray(`  then run: grok    (uses the injected GROK_HOME config)`));
+    else if (frontendProvider === 'claude') console.log(chalk.gray(`  then run: claude  (uses ANTHROPIC_BASE_URL)`));
+    console.log(chalk.gray(`\n  or call directly, e.g.:  curl ${url}/v1/... `));
+    console.log(chalk.yellow(`\nPress Ctrl+C to stop.`));
+
+    const shutdown = () => {
+      try { proxyHandle.stop(); } catch {}
+      try { fs.rmSync(dir, { recursive: true, force: true }); } catch {}
+      process.exit(0);
+    };
+    process.on('SIGINT', shutdown);
+    process.on('SIGTERM', shutdown);
+  });
+
 function getBypassFlags(provider: string): string[] {
   if (provider === 'claude' || provider === 'claude-code') {
     return ['--dangerously-skip-permissions'];

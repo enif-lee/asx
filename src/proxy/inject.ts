@@ -42,6 +42,7 @@ async function injectCodexProxy(tmpDir: string | undefined, proxyBaseUrl: string
     env.CODEX_HOME = codexHome;
   }
 
+  env.CODEX_HOME = codexHome; // always expose it (exec seeds it too; standalone prints it)
   const cfgPath = path.join(codexHome, 'config.toml');
   fs.mkdirSync(codexHome, { recursive: true });
 
@@ -98,6 +99,7 @@ async function injectGrokProxy(tmpDir: string | undefined, proxyBaseUrl: string,
     env.GROK_HOME = grokHome;
   }
 
+  env.GROK_HOME = grokHome; // always expose it (exec seeds it too; standalone prints it)
   fs.mkdirSync(grokHome, { recursive: true });
 
   const base = proxyBaseUrl.replace(/\/+$/, '');
