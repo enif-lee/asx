@@ -6,12 +6,7 @@
 //   terminated by `data: [DONE]`.
 import type { AgentAdapter, BackendAdapter, CommonRequest, CommonEvent, CommonResponse, StreamCtx } from '../types.js';
 import { resolveChoice } from '../models.js';
-
-function toText(content: any): string {
-  if (typeof content === 'string') return content;
-  if (Array.isArray(content)) return content.map((c) => c?.text ?? (typeof c === 'string' ? c : '')).join('');
-  return content == null ? '' : String(content);
-}
+import { sseData as sse, sseHeaders, toText } from './util.js';
 
 export const grokAgent: AgentAdapter = {
   parseRequest(_path, body): CommonRequest {
@@ -31,9 +26,7 @@ export const grokAgent: AgentAdapter = {
     };
   },
 
-  streamHeaders() {
-    return { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache', Connection: 'keep-alive' };
-  },
+  streamHeaders: sseHeaders,
 
   formatStreamChunk(ev: CommonEvent, ctx: StreamCtx): string {
     if (ev.type === 'text') {
@@ -58,8 +51,6 @@ export const grokAgent: AgentAdapter = {
     };
   },
 };
-
-function sse(obj: any): string { return `data: ${JSON.stringify(obj)}\n\n`; }
 
 // Grok cloud backend — cli-chat-proxy.grok.com, OpenAI Chat Completions wire, OIDC session token.
 // Verified contract (grok 0.2.77): needs client-version + token-auth headers, streaming only,
@@ -109,9 +100,5 @@ export const grokBackend: BackendAdapter = {
       if (ch.finish_reason) out.push({ type: 'done', finishReason: ch.finish_reason });
     }
     return out;
-  },
-
-  parseResponse(json: any): CommonResponse {
-    return { text: json.choices?.[0]?.message?.content || '' };
   },
 };

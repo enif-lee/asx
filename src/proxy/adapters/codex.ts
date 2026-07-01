@@ -9,6 +9,7 @@
 import { randomUUID } from 'node:crypto';
 import type { AgentAdapter, BackendAdapter, CommonRequest, CommonEvent, CommonResponse, StreamCtx } from '../types.js';
 import { resolveChoice } from '../models.js';
+import { sseEvent as resp, sseHeaders, toText } from './util.js';
 
 const CODEX_URL = 'https://chatgpt.com/backend-api/codex/responses';
 
@@ -81,17 +82,6 @@ export const codexBackend: BackendAdapter = {
     }
     return out;
   },
-
-  parseResponse(json: any): CommonResponse {
-    // non-stream Responses shape (fallback; codex normally streams)
-    let text = '';
-    if (Array.isArray(json.output)) {
-      for (const item of json.output) {
-        for (const c of item.content || []) text += c.text || '';
-      }
-    }
-    return { text };
-  },
 };
 
 // Codex CLI agent adapter — the codex binary speaks the ChatGPT Responses API to the proxy.
@@ -102,8 +92,7 @@ function responsesInputToMessages(input: any): { role: string; content: string }
     if (typeof it === 'string') { out.push({ role: 'user', content: it }); continue; }
     if (!it) continue;
     const role = it.role || 'user';
-    let content = it.content;
-    if (Array.isArray(content)) content = content.map((c: any) => c?.text ?? (typeof c === 'string' ? c : '')).join('');
+    const content = Array.isArray(it.content) ? toText(it.content) : it.content;
     if (content || it.text) out.push({ role, content: content || it.text });
   }
   return out;
@@ -125,9 +114,7 @@ export const codexAgent: AgentAdapter = {
     };
   },
 
-  streamHeaders() {
-    return { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache', Connection: 'keep-alive' };
-  },
+  streamHeaders: sseHeaders,
 
   formatStreamChunk(ev: CommonEvent, ctx: StreamCtx): string {
     if (!ctx.itemId) ctx.itemId = 'msg_' + ctx.id;
@@ -165,4 +152,3 @@ export const codexAgent: AgentAdapter = {
   },
 };
 
-function resp(event: string, data: any): string { return `event: ${event}\ndata: ${JSON.stringify(data)}\n\n`; }

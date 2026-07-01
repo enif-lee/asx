@@ -3,12 +3,7 @@
 // real answers. Backend uses Claude Code OAuth subscription inference (Bearer + claude-code beta).
 import type { AgentAdapter, BackendAdapter, CommonRequest, CommonEvent, CommonResponse, StreamCtx } from '../types.js';
 import { resolveChoice } from '../models.js';
-
-function toText(content: any): string {
-  if (typeof content === 'string') return content;
-  if (Array.isArray(content)) return content.map((c) => c?.text ?? '').join('');
-  return content == null ? '' : String(content);
-}
+import { sseEvent as anthEvent, sseHeaders, toText } from './util.js';
 
 export const claudeAgent: AgentAdapter = {
   parseRequest(_path, body): CommonRequest {
@@ -23,9 +18,7 @@ export const claudeAgent: AgentAdapter = {
       temperature: body.temperature,
     };
   },
-  streamHeaders() {
-    return { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache', Connection: 'keep-alive' };
-  },
+  streamHeaders: sseHeaders,
   formatStreamChunk(ev: CommonEvent, ctx: StreamCtx): string {
     // Open the message exactly once, even when the first event is done/error.
     const init = (): string => {
@@ -92,10 +85,4 @@ export const claudeBackend: BackendAdapter = {
     }
     return out;
   },
-  parseResponse(json: any): CommonResponse {
-    const text = (json.content || []).filter((c: any) => c.type === 'text').map((c: any) => c.text).join('');
-    return { text };
-  },
 };
-
-function anthEvent(event: string, data: any): string { return `event: ${event}\ndata: ${JSON.stringify(data)}\n\n`; }

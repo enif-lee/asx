@@ -13,8 +13,6 @@ export function getPlatform(): Platform {
 }
 
 export function isMac(): boolean { return getPlatform() === 'darwin'; }
-export function isWin(): boolean { return getPlatform() === 'win32'; }
-export function isLinux(): boolean { return getPlatform() === 'linux'; }
 
 function expandHome(p: string): string {
   if (p.startsWith('~/') || p.startsWith('~\\')) {
@@ -55,10 +53,6 @@ export function getClaudeCredentialsPath(): string {
   return path.join(base, '.credentials.json');
 }
 
-export function getClaudeSettingsPath(): string {
-  return path.join(getClaudeConfigDir(), 'settings.json');
-}
-
 // === Codex ===
 export function getCodexHome(): string {
   if (process.env.CODEX_HOME) return expandHome(process.env.CODEX_HOME);
@@ -69,43 +63,6 @@ export function getCodexAuthPath(): string {
   return path.join(getCodexHome(), 'auth.json');
 }
 
-export function getCodexConfigPath(): string {
-  return path.join(getCodexHome(), 'config.toml');
-}
-
-// === Cursor ===
-export function getCursorGlobalStorageDir(): string {
-  const plat = getPlatform();
-  if (plat === 'darwin') {
-    return path.join(os.homedir(), 'Library', 'Application Support', 'Cursor', 'User', 'globalStorage');
-  }
-  if (plat === 'win32') {
-    const base = process.env.APPDATA || path.join(os.homedir(), 'AppData', 'Roaming');
-    return path.join(base, 'Cursor', 'User', 'globalStorage');
-  }
-  // Linux
-  const xdg = process.env.XDG_CONFIG_HOME || path.join(os.homedir(), '.config');
-  return path.join(xdg, 'Cursor', 'User', 'globalStorage');
-}
-
-export function getCursorStateDbPath(): string {
-  return path.join(getCursorGlobalStorageDir(), 'state.vscdb');
-}
-
-// === Grok (local ~/.grok) ===
-export function getGrokHome(): string {
-  if (process.env.GROK_HOME) return expandHome(process.env.GROK_HOME);
-  return getHomeDotDir('grok');
-}
-
-export function getGrokAuthPath(): string {
-  return path.join(getGrokHome(), 'auth.json');
-}
-
-// === Z.AI (mostly env based, but support common locations) ===
-export function getZaiPreferredKeyEnv(): string[] {
-  return ['ZAI_API_KEY', 'GLM_API_KEY', 'Z_AI_API_KEY'];
-}
 
 // Generic helper to ensure parent dir
 export function ensureDirFor(filePath: string): void {

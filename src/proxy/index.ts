@@ -1,5 +1,5 @@
 // ASX Proxy public API for CLI integration.
-export type { ProxyHandle, ProxyStartOptions, TargetCred } from './types.js';
+export type { ProxyHandle, ProxyStartOptions } from './types.js';
 export { injectProxyEndpoint } from './inject.js';
 export { startProxy } from './server.js';
 

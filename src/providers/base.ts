@@ -8,9 +8,6 @@ export interface ProviderAdapter {
   // Make the named account the active one for the provider (mutate OS store / keychain / file)
   switchTo(accountName: string): Promise<void>;
 
-  // Return current active (best effort)
-  getCurrent?(): Promise<string | null>;
-
   // Try to extract email from current login (used for auto-naming and metadata)
   getCurrentEmail?(): Promise<string | undefined>;
 
@@ -30,7 +27,6 @@ export interface ProviderAdapter {
   // This is used by `asx list` to mark which stored account matches what the native tool is actually using right now.
   getCurrentCredential?(): Promise<string | null>;
 
-  removeAccount?(accountName: string): Promise<void>;
 
   // True if the stored credential is expired (or within the refresh skew of expiring).
   isExpired?(accountName: string): Promise<boolean>;

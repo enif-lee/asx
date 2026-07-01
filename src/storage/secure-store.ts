@@ -160,17 +160,6 @@ export async function listSecretsForProvider(provider: string): Promise<string[]
     .map(k => k.split(':')[1]);
 }
 
-export async function getAccountInfo(provider: string, name: string): Promise<{ email?: string; label?: string } | null> {
-  const key = makeKey(provider, name);
-  const v = await loadVault();
-  const acc = v.accounts[key];
-  if (!acc) return null;
-  return { email: acc.email, label: acc.label };
-}
-
-export async function hasCrossKeychain(): Promise<boolean> {
-  return !!crossKeychain?.setPassword;
-}
 
 export async function renameSecret(provider: string, oldName: string, newName: string): Promise<void> {
   if (!oldName || !newName || oldName === newName) {

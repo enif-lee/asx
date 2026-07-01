@@ -130,11 +130,6 @@ export const claudeCodeAdapter: ProviderAdapter = {
     setActive(PROVIDER, accountName);
   },
 
-  async getCurrent() {
-    const raw = readCurrentCredentials();
-    return raw ? 'active (token present)' : null;
-  },
-
   async getCurrentCredential() {
     return readCurrentCredentials();
   },

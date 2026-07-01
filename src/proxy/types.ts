@@ -50,8 +50,6 @@ export interface BackendAdapter {
   buildRequest(req: CommonRequest, cred: string): { url: string; headers: Record<string, string>; body: string };
   // Parse one upstream SSE event block into COMMON events.
   parseStreamChunk(eventBlock: string): CommonEvent[];
-  // Parse a non-stream upstream response into COMMON.
-  parseResponse(json: any): CommonResponse;
 }
 
 export interface StreamCtx {
@@ -78,8 +76,3 @@ export interface ProxyHandle {
 }
 
 // kept for back-compat with cli.ts cred shape
-export interface TargetCred {
-  apiKey?: string;
-  raw?: string;
-  type: 'anthropic' | 'openai' | 'codex-oauth' | 'key';
-}
