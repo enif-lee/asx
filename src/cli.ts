@@ -172,17 +172,13 @@ program
   .command('load [provider] [name]')
   .description('Load (snapshot) currently active credential(s) from provider into asx. If no provider given, auto-detects main providers.')
   .action(async (provider?: string, name?: string) => {
-    const mainProviders = ['claude', 'codex', 'grok', 'cursor'];
+    const { getSecret } = await import('./storage/secure-store.js');
+    // No provider: scan every known agent configured on this machine (not a fixed list).
+    const targets: Array<{provider: string, explicitName?: string}> = provider
+      ? [{ provider, explicitName: name }]
+      : listKnownProviders().map(p => ({ provider: p }));
 
-    const targets: Array<{provider: string, explicitName?: string}> = [];
-    if (!provider) {
-      for (const p of mainProviders) {
-        targets.push({ provider: p });
-      }
-    } else {
-      targets.push({ provider, explicitName: name });
-    }
-
+    let any = false;
     for (const { provider: p, explicitName } of targets) {
       let adapter: any;
       try {
@@ -192,6 +188,11 @@ program
       }
 
       try {
+        // Read the live (native) credential for this provider. In auto mode, skip
+        // providers with no configured agent quietly.
+        const localCred = adapter.getCurrentCredential ? await adapter.getCurrentCredential().catch(() => null) : null;
+        if (!provider && !localCred) continue;
+
         // Resolve the email of the credential being loaded (for dedup + naming).
         let email: string | undefined;
         if (adapter.getCurrentEmail) {
@@ -202,20 +203,27 @@ program
         // provider, update it in place instead of creating a differently-named
         // duplicate (e.g. ed.claude vs e-ed.claude for the same e-ed@ account).
         let finalName = explicitName;
-        let updating = false;
+        let existingCred: string | null = null;
         if (email) {
           const existing = listAccounts(p).find(a => a.email && a.email.toLowerCase() === email!.toLowerCase());
           if (existing && (!explicitName || explicitName === existing.name)) {
             finalName = existing.name;
-            updating = true;
+            existingCred = await getSecret(p, existing.name).catch(() => null);
           } else if (existing && explicitName && explicitName !== existing.name) {
             console.log(chalk.yellow(`Note: ${email} is already stored as ${p}/${existing.name}; saving under ${explicitName} too.`));
           }
         }
         if (!finalName) finalName = deriveAccountName(email, p);
+        if (!existingCred) existingCred = await getSecret(p, finalName).catch(() => null);
 
+        // Prefer the local credential: loadCurrent() snapshots the native cred, so a
+        // stored profile that differs is overwritten with the local one.
         await adapter.loadCurrent(finalName);
-        const verb = updating ? 'Updated' : 'Loaded';
+        any = true;
+
+        const verb = existingCred === null ? 'Loaded'
+          : (localCred && existingCred !== localCred) ? 'Updated (local credential preferred)'
+          : 'Unchanged';
         console.log(chalk.green(`${verb} ${p}/${finalName}${email ? ` (${email})` : ''}`));
       } catch (e: any) {
         const msg = e.message || String(e);
@@ -226,6 +234,7 @@ program
         if (provider) process.exit(1);
       }
     }
+    if (!provider && !any) console.log(chalk.gray('No configured agents found to load.'));
   });
 
 // Non-destructive re-login flow: save current session, clear local, run native login,

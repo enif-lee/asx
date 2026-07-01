@@ -2,13 +2,16 @@ import { platform } from 'node:os';
 import { execSync } from 'node:child_process';
 import path from 'node:path';
 import fs from 'node:fs';
+import { createRequire } from 'node:module';
 import { getAsxConfigDir, ensureDirFor } from '../utils/platform.js';
 
 // cross-keychain types are loose; we use any + try/catch for safety.
+// NOTE: this file compiles to ESM, where bare `require` is undefined — use
+// createRequire, else the keychain client never loads and every getSecret falls
+// back to a broken path (security -w returns hex → JSON.parse fails → null).
 let crossKeychain: any = null;
 try {
-  // eslint-disable-next-line @typescript-eslint/no-var-requires
-  crossKeychain = require('cross-keychain');
+  crossKeychain = createRequire(import.meta.url)('cross-keychain');
 } catch {
   // Will fallback
 }
