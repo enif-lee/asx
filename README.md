@@ -1,26 +1,22 @@
 # asx
 
+<p align="center">
+  <img src="docs/assets/asx-title.png" alt="asx - multi-account agent switcher" />
+</p>
+
 **Multi-account switcher for LLM coding tools.**
 
 Store credentials securely in the platform keychain and switch between accounts instantly.
 
 ## ✨ Features
 
-- **Single Vault**: All account credentials are stored in one platform keychain vault (`cross-keychain` + native fallbacks). A `0600` file vault is used only when keychain storage is unavailable.
-- **Instant Switch**: `asx switch claude personal` (or `asx s claude personal`) updates the active credentials so `claude`, `codex`, etc. see the right account immediately.
-- **List shows live system state**: `asx list` marks the profile that currently matches the live credential in the system (keychain / auth files) with `(current in system)`.
-- **Beautiful Usage**: Live quota reporting with consistent progress bars (`bar(remaining%) / used%`).
-  - Claude Code: accurate 5h / 7d via official OAuth usage API
-  - Codex: 5h / 7d windows via ChatGPT backend
-  - Grok / xAI / Z.AI: credits + rate limits
-- **Isolated Execution**: `asx exec <name>` (alias `e`) runs the native tool using a temporary credential copy (via `CODEX_HOME`, `CLAUDE_CONFIG_DIR`, `GROK_HOME` etc.). Other terminals are unaffected. When the profile is already the current active one, it runs directly against the live storage. Temp files are automatically cleaned up on exit.
-  - `-b, --bypass`: Automatically injects full-access bypass flags for the provider:
-    - claude/grok: `--dangerously-skip-permissions`
-    - codex: `--dangerously-bypass-approvals-and-sandbox` + `--dangerously-bypass-hook-trust`
-- **Convenient Load + Login**: `asx load` snapshots the currently active credential. `asx login claude` uses Claude's native access/refresh token flow inside an isolated `CLAUDE_CONFIG_DIR`; add `--long-lived` to store a `CLAUDE_CODE_OAUTH_TOKEN` instead.
-- **Provider-less Commands**: `asx exec <name>`, `asx remove <name>` work without provider (name is globally unique or resolved).
-- **Email Tracking**: Stores associated email when loading accounts.
-- **Cross-platform**: Strong support on macOS, works on Linux/Windows.
+- **Multiple accounts, one workflow**: Keep work, personal, and team accounts for Claude Code, Codex, Grok, Z.AI, and other providers.
+- **Fast account switching**: Make a saved profile active with `asx switch` and keep `asx list` honest about what is currently loaded.
+- **One-off isolated runs**: Run an agent with a selected profile without changing other terminals or your default login.
+- **Cross-provider execution**: Use one agent UI with another provider backend, such as running Codex while routing requests to Claude, Grok, or Z.AI.
+- **Usage at a glance**: Show live quota, credits, and rate-limit information with `asx list -u`.
+- **Safer login management**: Save existing sessions before new logins, load current sessions into profiles, and keep credentials in the platform credential store.
+- **Cross-platform installer**: Install from GitHub Releases on macOS, Linux, and Windows.
 
 ## 📦 Installation
 
