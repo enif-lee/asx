@@ -4,6 +4,7 @@ import path from 'node:path';
 import { setSecret, getSecret } from '../storage/secure-store.js';
 import { addAccount } from '../storage/account-store.js';
 import { renderBar } from '../utils/bar.js';
+import { decodeJwtClaims } from '../utils/jwt.js';
 import type { ProviderAdapter } from './base.js';
 
 function getGrokAuth(): any | undefined {
@@ -24,19 +25,8 @@ function tryExtractGrokEmail(): string | undefined {
 }
 
 function parseGrokTokenInfo(token: string): any {
-  try {
-    if (!token || !token.startsWith('ey')) return null;
-    const parts = token.split('.');
-    if (parts.length < 2) return null;
-    let payload = parts[1];
-    // base64url to base64
-    payload = payload.replace(/-/g, '+').replace(/_/g, '/');
-    while (payload.length % 4) payload += '=';
-    const decoded = Buffer.from(payload, 'base64').toString('utf8');
-    return JSON.parse(decoded);
-  } catch {
-    return null;
-  }
+  if (!token || !token.startsWith('ey')) return null;
+  return decodeJwtClaims(token);
 }
 
 export function createKeyAdapter(provider: string): ProviderAdapter {

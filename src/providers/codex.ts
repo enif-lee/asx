@@ -4,6 +4,7 @@ import { setSecret, getSecret } from '../storage/secure-store.js';
 import { addAccount } from '../storage/account-store.js';
 import { getCodexAuthPath, ensureDirFor } from '../utils/platform.js';
 import { renderBar, formatReset } from '../utils/bar.js';
+import { decodeJwtClaims } from '../utils/jwt.js';
 
 // Codex windows report reset_at (unix seconds) or reset_after_seconds (relative).
 function codexReset(w: any): string {
@@ -16,22 +17,9 @@ import type { ProviderAdapter } from './base.js';
 function extractCodexEmail(authJson: string): string | undefined {
   try {
     const data = JSON.parse(authJson);
-    // Try top level
     if (data.email) return data.email;
-
-    const idToken = data?.tokens?.id_token;
-    if (idToken && typeof idToken === 'string') {
-      const parts = idToken.split('.');
-      if (parts.length >= 2) {
-        const payload = parts[1];
-        // base64url decode
-        const b64 = payload.replace(/-/g, '+').replace(/_/g, '/') + '=='.slice(0, (4 - payload.length % 4) % 4);
-        const decoded = Buffer.from(b64, 'base64').toString('utf8');
-        const claims = JSON.parse(decoded);
-        return claims.email || claims.email_address;
-      }
-    }
-    return undefined;
+    const claims = decodeJwtClaims(data?.tokens?.id_token);
+    return claims?.email || claims?.email_address;
   } catch {
     return undefined;
   }
@@ -52,18 +40,13 @@ function writeCodexAuth(raw: string) {
 }
 
 function extractPlanFromIdToken(idToken: string) {
-  try {
-    const payload = idToken.split('.')[1];
-    const json = Buffer.from(payload, 'base64').toString();
-    const claims = JSON.parse(json);
-    const auth = claims['https://api.openai.com/auth'] || {};
-    return {
-      planType: auth.chatgpt_plan_type,
-      activeUntil: auth.chatgpt_subscription_active_until,
-    };
-  } catch {
-    return null;
-  }
+  const claims = decodeJwtClaims(idToken);
+  if (!claims) return null;
+  const auth = claims['https://api.openai.com/auth'] || {};
+  return {
+    planType: auth.chatgpt_plan_type,
+    activeUntil: auth.chatgpt_subscription_active_until,
+  };
 }
 
 async function attemptCodexNativeRefresh(accountName: string): Promise<boolean> {
@@ -178,10 +161,8 @@ export const codexAdapter: ProviderAdapter = {
     if (!raw) return false;
     try {
       const t = (JSON.parse(raw).tokens) || {};
-      const tok = t.access_token || t.id_token;
-      if (!tok) return false;
-      const claims = JSON.parse(Buffer.from(tok.split('.')[1], 'base64url').toString());
-      return typeof claims.exp === 'number' && claims.exp * 1000 < Date.now() + 60_000;
+      const claims = decodeJwtClaims(t.access_token || t.id_token);
+      return !!claims && typeof claims.exp === 'number' && claims.exp * 1000 < Date.now() + 60_000;
     } catch { return false; }
   },
 
