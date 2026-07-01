@@ -40,7 +40,9 @@ export async function startProxy(options: ProxyStartOptions): Promise<ProxyHandl
       dlog(`[asx-proxy] req model=${common.model} msgs=${common.messages.length} stream=${common.stream} prompt~="${(common.messages.at(-1)?.content || '').slice(0, 50)}"`);
 
       const up = backend.buildRequest(common, cred);
-      const upstreamRes = await fetch(up.url, { method: 'POST', headers: up.headers, body: up.body });
+      // Guard against an upstream that never responds/closes.
+      const timeout = AbortSignal.timeout ? AbortSignal.timeout(120_000) : undefined;
+      const upstreamRes = await fetch(up.url, { method: 'POST', headers: up.headers, body: up.body, signal: timeout });
       dlog(`[asx-proxy] upstream ${up.url} -> ${upstreamRes.status}`);
 
       const ctx: StreamCtx = { id: 'chatcmpl-asx-' + reqId, created: Math.floor(Date.now() / 1000), model: common.model, first: true };
@@ -64,55 +66,22 @@ export async function startProxy(options: ProxyStartOptions): Promise<ProxyHandl
       }
 
       if (common.stream) {
-        const hdrs = agent.streamHeaders();
-        res.writeHead(200, hdrs);
-        if (!upstreamRes.body) { res.end(agent.formatStreamChunk({ type: 'done' }, ctx)); return; }
-
-        const reader = upstreamRes.body.getReader();
-        const decoder = new TextDecoder();
-        let buf = '';
+        res.writeHead(200, agent.streamHeaders());
         let sawDone = false;
-        while (true) {
-          const { done, value } = await reader.read();
-          if (done) break;
-          buf += decoder.decode(value, { stream: true });
-          // frame upstream SSE on blank-line boundaries
-          let idx;
-          while ((idx = buf.indexOf('\n\n')) >= 0) {
-            const block = buf.slice(0, idx);
-            buf = buf.slice(idx + 2);
-            for (const ev of backend.parseStreamChunk(block)) {
-              if (ev.type === 'done') sawDone = true;
-              res.write(agent.formatStreamChunk(ev, ctx));
-            }
-          }
-        }
-        if (buf.trim()) for (const ev of backend.parseStreamChunk(buf)) { if (ev.type === 'done') sawDone = true; res.write(agent.formatStreamChunk(ev, ctx)); }
+        await forEachUpstreamEvent(upstreamRes.body, backend, (ev) => {
+          if (ev.type === 'done') sawDone = true;
+          res.write(agent.formatStreamChunk(ev, ctx));
+        });
         if (!sawDone) res.write(agent.formatStreamChunk({ type: 'done' }, ctx));
         res.end();
       } else {
         // Agent wanted non-stream; backend still streams — accumulate, then format once.
         let text = '';
         let finishReason: string | undefined;
-        if (upstreamRes.body) {
-          const reader = upstreamRes.body.getReader();
-          const decoder = new TextDecoder();
-          let buf = '';
-          const consume = (block: string) => {
-            for (const ev of backend.parseStreamChunk(block)) {
-              if (ev.type === 'text') text += ev.text;
-              else if (ev.type === 'done') finishReason = ev.finishReason;
-            }
-          };
-          while (true) {
-            const { done, value } = await reader.read();
-            if (done) break;
-            buf += decoder.decode(value, { stream: true });
-            let idx;
-            while ((idx = buf.indexOf('\n\n')) >= 0) { consume(buf.slice(0, idx)); buf = buf.slice(idx + 2); }
-          }
-          if (buf.trim()) consume(buf);
-        }
+        await forEachUpstreamEvent(upstreamRes.body, backend, (ev) => {
+          if (ev.type === 'text') text += ev.text;
+          else if (ev.type === 'done') finishReason = ev.finishReason;
+        });
         res.writeHead(200, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify(agent.formatResponse({ text, finishReason }, common)));
       }
@@ -127,6 +96,41 @@ export async function startProxy(options: ProxyStartOptions): Promise<ProxyHandl
   const url = `http://127.0.0.1:${port}`;
   dlog(`[asx-proxy] listening on ${url} (agent=${agentProvider} backend=${backendProvider})`);
   return { url, port, stop: () => { try { server.close(); } catch {} } };
+}
+
+// Read an upstream SSE body, frame it on blank-line boundaries, and emit each COMMON
+// event. Normalizes CRLF, flushes the decoder at end (no truncated multi-byte UTF-8),
+// and always releases the reader.
+export async function forEachUpstreamEvent(
+  body: ReadableStream<Uint8Array> | null,
+  backend: { parseStreamChunk(block: string): CommonEvent[] },
+  emit: (ev: CommonEvent) => void,
+): Promise<void> {
+  if (!body) return;
+  const reader = body.getReader();
+  const decoder = new TextDecoder();
+  let buf = '';
+  const drain = () => {
+    let idx;
+    while ((idx = buf.indexOf('\n\n')) >= 0) {
+      const block = buf.slice(0, idx);
+      buf = buf.slice(idx + 2);
+      for (const ev of backend.parseStreamChunk(block)) emit(ev);
+    }
+  };
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buf += decoder.decode(value, { stream: true }).replace(/\r\n/g, '\n');
+      drain();
+    }
+    buf += decoder.decode(); // flush any trailing multi-byte sequence
+    drain();
+    if (buf.trim()) for (const ev of backend.parseStreamChunk(buf)) emit(ev);
+  } finally {
+    try { reader.releaseLock(); } catch {}
+  }
 }
 
 async function readBody(req: http.IncomingMessage): Promise<string> {

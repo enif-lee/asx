@@ -13,9 +13,13 @@ import { resolveChoice } from '../models.js';
 const CODEX_URL = 'https://chatgpt.com/backend-api/codex/responses';
 
 function extractAuth(cred: string): { token: string; account: string } {
-  const d = JSON.parse(cred);
-  const t = d.tokens || d;
-  return { token: t.access_token || t.id_token || '', account: t.account_id || '' };
+  try {
+    const d = JSON.parse(cred);
+    const t = d.tokens || d;
+    return { token: t.access_token || t.id_token || '', account: t.account_id || '' };
+  } catch {
+    return { token: cred, account: '' }; // cred was a bare token, not an auth.json
+  }
 }
 
 export const codexBackend: BackendAdapter = {
@@ -127,27 +131,30 @@ export const codexAgent: AgentAdapter = {
 
   formatStreamChunk(ev: CommonEvent, ctx: StreamCtx): string {
     if (!ctx.itemId) ctx.itemId = 'msg_' + ctx.id;
+    // Emit the opening events exactly once, even when the first event is done/error
+    // (empty or error-only responses still need a well-formed item to close).
+    const init = (): string => {
+      if (!ctx.first) return '';
+      ctx.first = false;
+      ctx.acc = '';
+      return resp('response.created', { type: 'response.created', response: { id: ctx.id, object: 'response', status: 'in_progress', model: ctx.model, output: [] } })
+        + resp('response.output_item.added', { type: 'response.output_item.added', output_index: 0, item: { id: ctx.itemId, type: 'message', role: 'assistant', content: [] } })
+        + resp('response.content_part.added', { type: 'response.content_part.added', item_id: ctx.itemId, output_index: 0, content_index: 0, part: { type: 'output_text', text: '' } });
+    };
     if (ev.type === 'text') {
-      let out = '';
-      if (ctx.first) {
-        ctx.first = false;
-        ctx.acc = '';
-        out += resp('response.created', { type: 'response.created', response: { id: ctx.id, object: 'response', status: 'in_progress', model: ctx.model, output: [] } });
-        out += resp('response.output_item.added', { type: 'response.output_item.added', output_index: 0, item: { id: ctx.itemId, type: 'message', role: 'assistant', content: [] } });
-        out += resp('response.content_part.added', { type: 'response.content_part.added', item_id: ctx.itemId, output_index: 0, content_index: 0, part: { type: 'output_text', text: '' } });
-      }
+      const out = init();
       ctx.acc = (ctx.acc || '') + ev.text;
       return out + resp('response.output_text.delta', { type: 'response.output_text.delta', item_id: ctx.itemId, output_index: 0, content_index: 0, delta: ev.text });
     }
-    if (ev.type === 'done') {
-      const text = ctx.acc || '';
-      const item = { id: ctx.itemId, type: 'message', role: 'assistant', content: [{ type: 'output_text', text }] };
-      return resp('response.output_text.done', { type: 'response.output_text.done', item_id: ctx.itemId, output_index: 0, content_index: 0, text })
-        + resp('response.content_part.done', { type: 'response.content_part.done', item_id: ctx.itemId, output_index: 0, content_index: 0, part: { type: 'output_text', text } })
-        + resp('response.output_item.done', { type: 'response.output_item.done', output_index: 0, item })
-        + resp('response.completed', { type: 'response.completed', response: { id: ctx.id, object: 'response', status: 'completed', model: ctx.model, output: [item] } });
-    }
-    return resp('response.completed', { type: 'response.completed', response: { id: ctx.id, object: 'response', status: 'completed', model: ctx.model, output: [] } });
+    // done or error: close the item with whatever text accumulated.
+    const out = init();
+    const text = ctx.acc || '';
+    const item = { id: ctx.itemId, type: 'message', role: 'assistant', content: [{ type: 'output_text', text }] };
+    return out
+      + resp('response.output_text.done', { type: 'response.output_text.done', item_id: ctx.itemId, output_index: 0, content_index: 0, text })
+      + resp('response.content_part.done', { type: 'response.content_part.done', item_id: ctx.itemId, output_index: 0, content_index: 0, part: { type: 'output_text', text } })
+      + resp('response.output_item.done', { type: 'response.output_item.done', output_index: 0, item })
+      + resp('response.completed', { type: 'response.completed', response: { id: ctx.id, object: 'response', status: 'completed', model: ctx.model, output: [item] } });
   },
 
   formatResponse(resp: CommonResponse, _req: CommonRequest) {

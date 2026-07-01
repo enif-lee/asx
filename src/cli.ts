@@ -64,9 +64,11 @@ function resolveProviderName(a?: string, b?: string): { provider?: string; name?
   const norm = (p?: string) => (p ? (normalizeProviderSync(p) || p.toLowerCase()) : undefined);
   if (a && b) return { provider: norm(a), name: b };
   if (!a) return {};
-  if (isKnownProviderSync(a)) return { provider: norm(a) };
+  // Prefer an existing account name (so an account whose name equals a provider string
+  // is still resolvable); otherwise treat the token as a provider (e.g. `login claude`).
   const acct = getAccountByName(a);
   if (acct) return { provider: acct.provider, name: a };
+  if (isKnownProviderSync(a)) return { provider: norm(a) };
   return { provider: norm(a) }; // unknown token; treat as provider and let downstream error
 }
 // sync wrappers around the (already-sync) provider helpers, imported lazily elsewhere
@@ -464,6 +466,8 @@ program
     // Reuse the exec injection to produce the exact config/env the frontend needs, into a
     // persistent dir, then tell the user which env vars to export to use it.
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), `asx-proxy-${frontendProvider}-`));
+    // Clean the temp dir on any exit (normal, crash, uncaught), not just Ctrl+C.
+    process.on('exit', () => { try { fs.rmSync(dir, { recursive: true, force: true }); } catch {} });
     const injected: NodeJS.ProcessEnv = {};
     await injectProxyEndpoint(frontendProvider, injected, url, dir, backendProvider);
 

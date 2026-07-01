@@ -27,22 +27,21 @@ export const claudeAgent: AgentAdapter = {
     return { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache', Connection: 'keep-alive' };
   },
   formatStreamChunk(ev: CommonEvent, ctx: StreamCtx): string {
+    // Open the message exactly once, even when the first event is done/error.
+    const init = (): string => {
+      if (!ctx.first) return '';
+      ctx.first = false;
+      return anthEvent('message_start', { type: 'message_start', message: { id: ctx.id, type: 'message', role: 'assistant', model: ctx.model, content: [], stop_reason: null } })
+        + anthEvent('content_block_start', { type: 'content_block_start', index: 0, content_block: { type: 'text', text: '' } });
+    };
     if (ev.type === 'text') {
-      let out = '';
-      if (ctx.first) {
-        ctx.first = false;
-        out += anthEvent('message_start', { type: 'message_start', message: { id: ctx.id, type: 'message', role: 'assistant', model: ctx.model, content: [], stop_reason: null } });
-        out += anthEvent('content_block_start', { type: 'content_block_start', index: 0, content_block: { type: 'text', text: '' } });
-      }
-      out += anthEvent('content_block_delta', { type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: ev.text } });
-      return out;
+      return init() + anthEvent('content_block_delta', { type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: ev.text } });
     }
-    if (ev.type === 'done') {
-      return anthEvent('content_block_stop', { type: 'content_block_stop', index: 0 })
-        + anthEvent('message_delta', { type: 'message_delta', delta: { stop_reason: 'end_turn' } })
-        + anthEvent('message_stop', { type: 'message_stop' });
-    }
-    return anthEvent('message_stop', { type: 'message_stop' });
+    // done or error: ensure the block was opened, then close cleanly.
+    return init()
+      + anthEvent('content_block_stop', { type: 'content_block_stop', index: 0 })
+      + anthEvent('message_delta', { type: 'message_delta', delta: { stop_reason: 'end_turn' } })
+      + anthEvent('message_stop', { type: 'message_stop' });
   },
   formatResponse(resp: CommonResponse, _req: CommonRequest) {
     return { id: 'msg_asx', type: 'message', role: 'assistant', content: [{ type: 'text', text: resp.text }], stop_reason: 'end_turn' };
