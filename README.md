@@ -2,11 +2,11 @@
 
 **Multi-account switcher for LLM coding tools.**
 
-Store credentials securely in a single OS Keychain vault and switch between accounts instantly.
+Store credentials securely in the platform keychain and switch between accounts instantly.
 
 ## ✨ Features
 
-- **Single Vault**: All accounts (across providers) stored in one secure entry using OS Keychain (`cross-keychain` + fallbacks).
+- **Single Vault**: All account credentials are stored in one platform keychain vault (`cross-keychain` + native fallbacks). A `0600` file vault is used only when keychain storage is unavailable.
 - **Instant Switch**: `asx switch claude personal` (or `asx s claude personal`) updates the active credentials so `claude`, `codex`, etc. see the right account immediately.
 - **List shows live system state**: `asx list` marks the profile that currently matches the live credential in the system (keychain / auth files) with `(current in system)`.
 - **Beautiful Usage**: Live quota reporting with consistent progress bars (`bar(remaining%) / used%`).
@@ -103,7 +103,7 @@ More providers can be added easily via the adapter pattern.
 
 ## 🔐 How It Works
 
-- Everything is stored in **one** secure vault item (`service=asx`, `account=vault`).
+- Credentials are stored in **one** platform keychain vault item (`service=asx`, `account=vault`). A `0600` file vault is used only as fallback when keychain storage is unavailable.
 - `asx load` (or `asx login`) reads the currently active credential from the provider's storage (keychain / `~/.codex/auth.json` / `~/.grok/auth.json` etc.) and saves it in the vault (with email).
 - `asx login claude [name]` runs `claude auth login` with a profile-scoped `CLAUDE_CONFIG_DIR`, then stores the resulting access/refresh credential in the asx vault without touching Claude's global Keychain credential.
 - `asx login claude [name] --long-lived` runs `claude setup-token`, asks for the long-lived token, and stores it in the asx vault for `CLAUDE_CODE_OAUTH_TOKEN` execution.

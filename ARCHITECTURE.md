@@ -100,20 +100,28 @@ flowchart TD
   Config["ASX config dir"]
   Accounts["accounts.json<br/>provider, name, label, email, addedAt"]
   Active[".active.json<br/>provider -> active profile name"]
-  VaultFile["vault.json<br/>provider:name -> raw credential"]
+  Keychain["platform keychain<br/>service=asx, account=vault"]
+  VaultFile["fallback vault.json<br/>provider:name -> raw credential"]
 
   Config --> Accounts
   Config --> Active
-  Config --> VaultFile
+  Keychain -. "fallback only when unavailable" .-> VaultFile
 ```
 
-The credential vault is a `0600` file by default:
+The credential vault is the platform keychain by default:
+
+```text
+service=asx
+account=vault
+```
+
+A `0600` file vault is only used when keychain storage is unavailable:
 
 ```text
 <platform config dir>/asx/vault.json
 ```
 
-On macOS, legacy keychain vaults are migrated into the file vault. Setting `ASX_KEYCHAIN=1` also writes the vault to keychain, but the file remains the default source of truth.
+Existing file vaults are migrated into the keychain on the next read or write. After a successful keychain write, the fallback file is removed.
 
 ### Provider Adapters
 

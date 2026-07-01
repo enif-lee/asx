@@ -8,7 +8,7 @@ import { getAsxConfigDir, ensureDirFor } from '../utils/platform.js';
 // cross-keychain types are loose; we use any + try/catch for safety.
 // NOTE: this file compiles to ESM, where bare `require` is undefined — use
 // createRequire, else the keychain client never loads and every getSecret falls
-// back to a broken path (security -w returns hex → JSON.parse fails → null).
+// back to the file vault.
 let crossKeychain: any = null;
 try {
   crossKeychain = createRequire(import.meta.url)('cross-keychain');
@@ -41,15 +41,18 @@ function loadVault(): Promise<VaultData> {
   return vaultCache;
 }
 
-// Storage policy: a 0600 file is the default vault. The macOS keychain reprompts
-// ("Always Allow" doesn't stick — every save rewrites the item and resets its ACL),
-// and the native tools already keep these same tokens in plaintext ~/.codex/auth.json
-// etc. Opt into the keychain with ASX_KEYCHAIN=1.
-function useKeychain(): boolean { return !!process.env.ASX_KEYCHAIN; }
+// Storage policy: platform keychain first. A 0600 file is only a fallback when
+// the keychain is unavailable, and existing file vaults are migrated into keychain.
 function vaultFile(): string { return path.join(getAsxConfigDir(), 'vault.json'); }
 
-function readKeychain(): string | null {
-  const account = process.env.USER || process.env.USERNAME || 'user';
+function legacyKeychainAccount(): string {
+  return process.env.USER || process.env.USERNAME || 'user';
+}
+
+async function readKeychainAccount(account: string): Promise<string | null> {
+  if (crossKeychain?.getPassword) {
+    try { return await crossKeychain.getPassword(VAULT_SERVICE, account); } catch {}
+  }
   if (isMac()) {
     try {
       return execSync(
@@ -61,11 +64,36 @@ function readKeychain(): string | null {
   return null;
 }
 
+async function readKeychain(): Promise<string | null> {
+  return await readKeychainAccount(VAULT_ACCOUNT)
+    || await readKeychainAccount(legacyKeychainAccount());
+}
+
+async function writeKeychain(data: string): Promise<boolean> {
+  if (crossKeychain?.setPassword) {
+    try { await crossKeychain.setPassword(VAULT_SERVICE, VAULT_ACCOUNT, data); return true; } catch {}
+  }
+  if (isMac()) {
+    try {
+      execSync(
+        `security add-generic-password -s ${JSON.stringify(VAULT_SERVICE)} -a ${JSON.stringify(VAULT_ACCOUNT)} -w ${JSON.stringify(data)} -U`,
+        { stdio: 'ignore' }
+      );
+      return true;
+    } catch {}
+  }
+  return false;
+}
+
 function writeFileVault(data: string): void {
   const f = vaultFile();
   ensureDirFor(f);
   fs.writeFileSync(f, data);
   try { fs.chmodSync(f, 0o600); } catch {}
+}
+
+function removeFileVault(): void {
+  try { fs.rmSync(vaultFile(), { force: true }); } catch {}
 }
 
 async function loadVaultUncached(): Promise<VaultData> {
@@ -74,27 +102,20 @@ async function loadVaultUncached(): Promise<VaultData> {
     try { const p = JSON.parse(raw); return p && p.accounts ? (p as VaultData) : null; } catch { return null; }
   };
 
-  // Default: file-first (no keychain prompt).
   const f = vaultFile();
-  if (fs.existsSync(f)) {
-    const v = parse(fs.readFileSync(f, 'utf8'));
-    if (v) return v;
-  }
+  const keychainVault = parse(await readKeychain());
+  const fileVault = fs.existsSync(f) ? parse(fs.readFileSync(f, 'utf8')) : null;
 
-  // No file yet: one-time migration from a legacy keychain vault (or opt-in keychain).
-  // Prefer crossKeychain.getPassword — the `security -w` fallback returns the item as
-  // hex, which won't parse. This read happens once, then the file takes over.
-  const account = process.env.USER || process.env.USERNAME || 'user';
-  let raw: string | null = null;
-  if (crossKeychain?.getPassword) {
-    try { raw = await crossKeychain.getPassword(VAULT_SERVICE, account); } catch {}
-  }
-  if (!raw) raw = readKeychain();
-  const v = parse(raw);
-  if (v) {
-    // Persist to the file so subsequent runs never touch the keychain again.
-    if (!useKeychain()) writeFileVault(JSON.stringify(v));
-    return v;
+  if (keychainVault && !fileVault) return keychainVault;
+
+  if (fileVault) {
+    // Existing file vaults came from the previous file-first policy, so treat the
+    // file as newer during migration and then remove it once keychain write works.
+    const merged: VaultData = keychainVault
+      ? { version: Math.max(keychainVault.version || 1, fileVault.version || 1), accounts: { ...keychainVault.accounts, ...fileVault.accounts } }
+      : fileVault;
+    if (await writeKeychain(JSON.stringify(merged))) removeFileVault();
+    return merged;
   }
 
   return { version: 1, accounts: {} };
@@ -103,22 +124,11 @@ async function loadVaultUncached(): Promise<VaultData> {
 async function saveVault(v: VaultData): Promise<void> {
   vaultCache = Promise.resolve(v); // keep cache in sync with what we just wrote
   const data = JSON.stringify(v);
-  writeFileVault(data); // file is the source of truth by default
-
-  if (useKeychain()) {
-    const account = process.env.USER || process.env.USERNAME || 'user';
-    if (crossKeychain?.setPassword) {
-      try { await crossKeychain.setPassword(VAULT_SERVICE, account, data); return; } catch {}
-    }
-    if (isMac()) {
-      try {
-        execSync(
-          `security add-generic-password -s ${JSON.stringify(VAULT_SERVICE)} -a ${JSON.stringify(account)} -w ${JSON.stringify(data)} -U`,
-          { stdio: 'ignore' }
-        );
-      } catch {}
-    }
+  if (await writeKeychain(data)) {
+    removeFileVault();
+    return;
   }
+  writeFileVault(data);
 }
 
 function makeKey(provider: string, name: string): string {
