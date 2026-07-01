@@ -31,4 +31,10 @@ export interface ProviderAdapter {
   getCurrentCredential?(): Promise<string | null>;
 
   removeAccount?(accountName: string): Promise<void>;
+
+  // True if the stored credential is expired (or within the refresh skew of expiring).
+  isExpired?(accountName: string): Promise<boolean>;
+
+  // Refresh (rotate) the stored credential for the account. Returns status + message.
+  refresh?(accountName: string): Promise<{ ok: boolean; message: string }>;
 }

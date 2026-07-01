@@ -33,6 +33,8 @@ async function extractClaudeEmail(credJson: string): Promise<string | undefined>
 }
 
 const PROVIDER = 'claude';
+// Claude Code's public OAuth client id (used for the refresh_token grant).
+const CLAUDE_OAUTH_CLIENT_ID = '9d1c250a-e61b-44d9-88ed-5944d1962f5e';
 
 function readCurrentCredentials(): string | null {
   const plat = getPlatform();
@@ -163,6 +165,40 @@ export const claudeCodeAdapter: ProviderAdapter = {
 
   getLoginCommand() {
     return ['claude', 'auth', 'login'];
+  },
+
+  async isExpired(accountName?: string) {
+    const raw = await getSecret(PROVIDER, accountName || '');
+    if (!raw) return false;
+    try {
+      const o = JSON.parse(raw).claudeAiOauth || {};
+      return typeof o.expiresAt === 'number' && o.expiresAt < Date.now() + 60_000;
+    } catch { return false; }
+  },
+
+  async refresh(accountName?: string) {
+    const raw = await getSecret(PROVIDER, accountName || '');
+    if (!raw) return { ok: false, message: 'no stored credential' };
+    let o: any;
+    try { o = JSON.parse(raw).claudeAiOauth; } catch { return { ok: false, message: 'stored credential is not valid JSON' }; }
+    if (!o?.refreshToken) return { ok: false, message: 'no refresh token stored — re-login: asx login claude' };
+    let res: Response;
+    try {
+      res = await fetch('https://console.anthropic.com/v1/oauth/token', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ grant_type: 'refresh_token', refresh_token: o.refreshToken, client_id: CLAUDE_OAUTH_CLIENT_ID }),
+      });
+    } catch (e: any) { return { ok: false, message: `network error: ${e?.message || e}` }; }
+    if (!res.ok) {
+      const j: any = await res.json().catch(() => ({}));
+      if (j.error === 'invalid_grant') return { ok: false, message: 'refresh token invalid/revoked — re-login: asx login claude' };
+      return { ok: false, message: `refresh failed (HTTP ${res.status}: ${j.error || ''})` };
+    }
+    const j: any = await res.json();
+    const updated = { claudeAiOauth: { ...o, accessToken: j.access_token, refreshToken: j.refresh_token || o.refreshToken, expiresAt: Date.now() + (j.expires_in || 0) * 1000 } };
+    await setSecret(PROVIDER, accountName || '', JSON.stringify(updated));
+    return { ok: true, message: `refreshed (expires ${new Date(updated.claudeAiOauth.expiresAt).toISOString()})` };
   },
 
   async getUsage(accountName?: string) {

@@ -40,6 +40,21 @@ function fakeCodexAuth(): string {
   return JSON.stringify({ OPENAI_API_KEY: null, tokens: { id_token: jwt, access_token: jwt, refresh_token: 'asx-proxy-refresh', account_id: 'asx-proxy' }, last_refresh: new Date().toISOString() });
 }
 
+// Refresh the stored credential if the adapter reports it expired. Best-effort; used
+// automatically before exec and `ls -u`. Returns true if the credential is usable after.
+async function ensureFresh(provider: string, name: string, verbose = false): Promise<boolean> {
+  let adapter: any;
+  try { adapter = getAdapter(provider); } catch { return true; }
+  if (!adapter.isExpired || !adapter.refresh) return true;
+  try {
+    if (!(await adapter.isExpired(name))) return true;
+    if (verbose) console.error(chalk.yellow(`[asx] ${provider}/${name} token expired — refreshing...`));
+    const r = await adapter.refresh(name);
+    if (verbose) console.error((r.ok ? chalk.gray : chalk.red)(`[asx] refresh ${name}: ${r.message}`));
+    return r.ok;
+  } catch { return true; }
+}
+
 const program = new Command();
 
 program
@@ -141,6 +156,7 @@ program
 
         if (opts.usage) {
           try {
+            await ensureFresh(p, a.name, false); // auto-refresh expired token before reading usage
             const usage = await (adapter.getUsage?.(a.name) ?? Promise.resolve(''));
             const lines = String(usage).trim().split('\n');
             for (const line of lines) {
@@ -362,6 +378,21 @@ program
     }
   });
 
+program
+  .command('refresh <provider> <name>')
+  .description('Refresh (rotate) a stored credential using its refresh token.\nExamples:\n  asx refresh claude jn.claude\n  asx refresh codex ed.codex')
+  .action(async (provider: string, name: string) => {
+    const { normalizeProvider } = await import('./providers/index.js');
+    const prov = normalizeProvider(provider) || provider.toLowerCase();
+    let adapter: any;
+    try { adapter = getAdapter(prov); } catch { console.error(chalk.red(`Unknown provider: ${provider}`)); process.exit(1); }
+    if (!adapter.refresh) { console.error(chalk.red(`Refresh not supported for '${prov}'.`)); process.exit(1); }
+    if (!getAccountByName(name)) { console.error(chalk.red(`No account found with name "${name}"`)); process.exit(1); }
+    const r = await adapter.refresh(name);
+    console.log(r.ok ? chalk.green(`✓ ${name}: ${r.message}`) : chalk.red(`✗ ${name}: ${r.message}`));
+    process.exit(r.ok ? 0 : 1);
+  });
+
 function getBypassFlags(provider: string): string[] {
   if (provider === 'claude' || provider === 'claude-code') {
     return ['--dangerously-skip-permissions'];
@@ -441,6 +472,14 @@ program
     };
 
     try {
+      // Auto-refresh the profile credential if expired, before any cred is read/seeded.
+      const wantDebug = process.argv.includes('-d') || process.argv.includes('--debug');
+      const fresh = await ensureFresh(profileProvider, accountName, wantDebug);
+      if (!fresh) {
+        console.error(chalk.red(`[asx] ${profileProvider}/${accountName} credential is expired and could not be refreshed. Re-login: asx login ${profileProvider}`));
+        process.exit(1);
+      }
+
       // Isolation policy:
       // - Always isolate when cross (different agent vs profile provider)
       // - When not cross, follow the original "isCurrent" logic for the profile.

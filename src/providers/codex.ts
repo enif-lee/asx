@@ -165,6 +165,26 @@ export const codexAdapter: ProviderAdapter = {
     const { setActive } = await import('../storage/account-store.js');
     setActive(P, name);
   },
+  async isExpired(accountName?: string) {
+    const raw = await getSecret(P, accountName || '');
+    if (!raw) return false;
+    try {
+      const t = (JSON.parse(raw).tokens) || {};
+      const tok = t.access_token || t.id_token;
+      if (!tok) return false;
+      const claims = JSON.parse(Buffer.from(tok.split('.')[1], 'base64url').toString());
+      return typeof claims.exp === 'number' && claims.exp * 1000 < Date.now() + 60_000;
+    } catch { return false; }
+  },
+
+  async refresh(accountName?: string) {
+    // Reuse Codex's own refresh flow (writes to native location, runs codex, reloads).
+    const did = await attemptCodexNativeRefresh(accountName || '');
+    return did
+      ? { ok: true, message: 'refreshed via native codex' }
+      : { ok: false, message: 'native refresh failed — re-login: asx login codex' };
+  },
+
   async getUsage(accountName?: string) {
     const name = accountName || '';
     try {
