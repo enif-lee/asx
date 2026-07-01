@@ -17,7 +17,7 @@ export function formatReset(when: Date | number | string): string {
   const d = when instanceof Date ? when : new Date(when);
   const t = d.getTime();
   if (isNaN(t)) return '';
-  const local = d.toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' });
+  const local = d.toLocaleString(undefined, { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
   const diff = t - Date.now();
   if (diff <= 0) return `resets ${local} (now)`;
   const mins = Math.round(diff / 60000);
