@@ -24,17 +24,24 @@ Store credentials securely in the platform keychain and switch between accounts 
 
 ## 📦 Installation
 
+macOS / Linux:
+
 ```bash
-# From source (recommended while in development)
-git clone https://github.com/enif-lee/asx.git
-cd asx
-npm install
-npm link
+curl -fsSL https://raw.githubusercontent.com/enif-lee/asx/main/install.sh | sh
 ```
 
-Or build and install globally:
+Windows PowerShell:
+
+```powershell
+irm https://raw.githubusercontent.com/enif-lee/asx/main/install.ps1 | iex
+```
+
+The installer downloads the latest GitHub Release package. If Node.js with `npm` or `pnpm` is not available, it installs Node.js LTS first.
+
+Development install:
 
 ```bash
+npm install
 npm run build
 npm install -g .
 ```
@@ -136,6 +143,14 @@ More providers can be added easily via the adapter pattern.
 npm run dev          # run with tsx
 npm run build        # tsc + chmod
 npm test
+```
+
+Developer guide: [Adding an Agent or Provider](docs/ADDING_AGENT_OR_PROVIDER.md)
+
+Release:
+
+```bash
+gh workflow run "Publish Release" -f version=0.1.0
 ```
 
 ## 📄 License

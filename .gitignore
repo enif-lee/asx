@@ -4,6 +4,8 @@ dist/
 .env*
 .DS_Store
 as-*.tgz
+asx-*.tgz
+release/
 coverage/
 tsconfig.tsbuildinfo
 *.tsbuildinfo

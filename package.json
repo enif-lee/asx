@@ -6,13 +6,19 @@
   "bin": {
     "asx": "./dist/cli.js"
   },
+  "files": [
+    "dist",
+    "README.md",
+    "ARCHITECTURE.md",
+    "docs"
+  ],
   "type": "module",
   "engines": {
     "node": ">=20.0.0"
   },
   "scripts": {
     "test": "vitest run",
-    "build": "tsc --build && node -e \"require('node:fs').chmodSync('dist/cli.js', 0o755)\"",
+    "build": "node -e \"require('node:fs').rmSync('dist', { recursive: true, force: true })\" && tsc --build --force && node -e \"require('node:fs').chmodSync('dist/cli.js', 0o755)\"",
     "dev": "tsx src/cli.ts",
     "prepare": "npm run build",
     "start": "node dist/cli.js"
