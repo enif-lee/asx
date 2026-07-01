@@ -36,5 +36,6 @@ export interface ProviderAdapter {
   isExpired?(accountName: string): Promise<boolean>;
 
   // Refresh (rotate) the stored credential for the account. Returns status + message.
-  refresh?(accountName: string): Promise<{ ok: boolean; message: string }>;
+  // needsRelogin = the refresh token is revoked/absent; caller may fall back to login flow.
+  refresh?(accountName: string): Promise<{ ok: boolean; message: string; needsRelogin?: boolean }>;
 }

@@ -182,7 +182,7 @@ export const codexAdapter: ProviderAdapter = {
     const did = await attemptCodexNativeRefresh(accountName || '');
     return did
       ? { ok: true, message: 'refreshed via native codex' }
-      : { ok: false, message: 'native refresh failed — re-login: asx login codex' };
+      : { ok: false, message: 'native refresh failed', needsRelogin: true };
   },
 
   async getUsage(accountName?: string) {

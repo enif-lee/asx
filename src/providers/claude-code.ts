@@ -181,7 +181,7 @@ export const claudeCodeAdapter: ProviderAdapter = {
     if (!raw) return { ok: false, message: 'no stored credential' };
     let o: any;
     try { o = JSON.parse(raw).claudeAiOauth; } catch { return { ok: false, message: 'stored credential is not valid JSON' }; }
-    if (!o?.refreshToken) return { ok: false, message: 'no refresh token stored — re-login: asx login claude' };
+    if (!o?.refreshToken) return { ok: false, message: 'no refresh token stored', needsRelogin: true };
     let res: Response;
     try {
       res = await fetch('https://console.anthropic.com/v1/oauth/token', {
@@ -192,7 +192,7 @@ export const claudeCodeAdapter: ProviderAdapter = {
     } catch (e: any) { return { ok: false, message: `network error: ${e?.message || e}` }; }
     if (!res.ok) {
       const j: any = await res.json().catch(() => ({}));
-      if (j.error === 'invalid_grant') return { ok: false, message: 'refresh token invalid/revoked — re-login: asx login claude' };
+      if (j.error === 'invalid_grant') return { ok: false, message: 'refresh token invalid/revoked', needsRelogin: true };
       return { ok: false, message: `refresh failed (HTTP ${res.status}: ${j.error || ''})` };
     }
     const j: any = await res.json();

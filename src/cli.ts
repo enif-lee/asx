@@ -228,12 +228,63 @@ program
     }
   });
 
+// Non-destructive re-login flow: save current session, clear local, run native login,
+// load the new session. Reused by `asx login` and by `asx refresh` when a token is revoked.
+async function runLoginFlow(p: string, adapter: any, name?: string): Promise<boolean> {
+  const loginCmd = typeof adapter.getLoginCommand === 'function' ? adapter.getLoginCommand() : null;
+  if (!loginCmd || loginCmd.length === 0) {
+    console.log(chalk.yellow(`Login flow is not supported for provider '${p}'.`));
+    console.log(chalk.gray(`For API-key providers (grok, zai, ...) use environment variables or run the native tool then 'asx load ${p} <name>'.`));
+    return false;
+  }
+
+  // 1. Save existing session (non-destructive)
+  try {
+    let prevEmail: string | undefined;
+    if (adapter.getCurrentEmail) prevEmail = await adapter.getCurrentEmail().catch(() => undefined);
+    const prevName = deriveAccountName(prevEmail, p);
+    await adapter.loadCurrent(prevName).catch((e: any) => {
+      const m = String(e?.message || e);
+      if (!/No active|No .*found|not found/i.test(m)) throw e;
+    });
+  } catch { /* non-fatal */ }
+
+  // 2. Clear only the local session
+  if (typeof adapter.clearCurrent === 'function') {
+    try { await adapter.clearCurrent(); } catch {}
+  }
+
+  // 3. Launch native login (interactive)
+  const [cmd, ...args] = loginCmd;
+  console.log(chalk.cyan(`Launching native login: ${loginCmd.join(' ')}`));
+  console.log(chalk.gray('Complete the login in the opened browser/terminal...'));
+  const exitCode = await new Promise<number>((resolve, reject) => {
+    const child = spawn(cmd, args, { stdio: 'inherit' });
+    child.on('error', (err) => reject(err));
+    child.on('close', (code) => resolve(code ?? 1));
+  });
+  if (exitCode !== 0) console.log(chalk.yellow(`Native login exited with code ${exitCode}.`));
+
+  // 4. Load the newly logged-in session
+  try {
+    let targetName = name;
+    let newEmail: string | undefined;
+    if (!targetName && adapter.getCurrentEmail) newEmail = await adapter.getCurrentEmail().catch(() => undefined);
+    if (!targetName) targetName = deriveAccountName(newEmail, p);
+    await adapter.loadCurrent(targetName);
+    console.log(chalk.green(`Loaded ${p}/${targetName} after login.`));
+    return true;
+  } catch (e: any) {
+    console.error(chalk.red(`Failed to load new session: ${e.message || e}`));
+    return false;
+  }
+}
+
 program
   .command('login <provider> [name]')
   .description('Save current session (non-destructively), clear local provider session, launch native login flow, then load the new session.')
   .action(async (provider: string, name?: string) => {
     const p = provider.toLowerCase();
-
     let adapter: any;
     try {
       adapter = getAdapter(p);
@@ -241,67 +292,7 @@ program
       console.error(chalk.red(e.message || e));
       return;
     }
-
-    const loginCmd = typeof adapter.getLoginCommand === 'function' ? adapter.getLoginCommand() : null;
-    if (!loginCmd || loginCmd.length === 0) {
-      console.log(chalk.yellow(`Login flow is not supported for provider '${p}'.`));
-      console.log(chalk.gray(`For API-key providers (grok, zai, ...) use environment variables or run the native tool then 'asx load ${p} <name>'.`));
-      return;
-    }
-
-    // 1. Save existing session (the key non-destructive step)
-    try {
-      let prevName: string;
-      let prevEmail: string | undefined;
-      if (adapter.getCurrentEmail) {
-        prevEmail = await adapter.getCurrentEmail().catch(() => undefined);
-      }
-      prevName = deriveAccountName(prevEmail, p);
-      // Best-effort: ignore "no current" errors
-      await adapter.loadCurrent(prevName).catch((e: any) => {
-        const m = String(e?.message || e);
-        if (!/No active|No .*found|not found/i.test(m)) throw e;
-      });
-    } catch (e: any) {
-      // non-fatal for login flow
-    }
-
-    // 2. Clear only the local session
-    if (typeof adapter.clearCurrent === 'function') {
-      try { await adapter.clearCurrent(); } catch {}
-    }
-
-    // 3. Launch native login (interactive)
-    const [cmd, ...args] = loginCmd;
-    console.log(chalk.cyan(`Launching native login: ${loginCmd.join(' ')}`));
-    console.log(chalk.gray('Complete the login in the opened browser/terminal...'));
-
-    const exitCode = await new Promise<number>((resolve, reject) => {
-      const child = spawn(cmd, args, { stdio: 'inherit' });
-      child.on('error', (err) => reject(err));
-      child.on('close', (code) => resolve(code ?? 1));
-    });
-
-    if (exitCode !== 0) {
-      console.log(chalk.yellow(`Native login exited with code ${exitCode}.`));
-    }
-
-    // 4. Load the newly logged-in session
-    try {
-      let targetName = name;
-      let newEmail: string | undefined;
-      if (!targetName && adapter.getCurrentEmail) {
-        newEmail = await adapter.getCurrentEmail().catch(() => undefined);
-      }
-      if (!targetName) {
-        targetName = deriveAccountName(newEmail, p);
-      }
-
-      await adapter.loadCurrent(targetName);
-      console.log(chalk.green(`Loaded ${p}/${targetName} after login.`));
-    } catch (e: any) {
-      console.error(chalk.red(`Failed to load new session: ${e.message || e}`));
-    }
+    await runLoginFlow(p, adapter, name);
   });
 
 program
@@ -392,8 +383,9 @@ program
 
 program
   .command('refresh <provider> <name>')
-  .description('Refresh (rotate) a stored credential using its refresh token.\nExamples:\n  asx refresh claude jn.claude\n  asx refresh codex ed.codex')
-  .action(async (provider: string, name: string) => {
+  .description('Refresh (rotate) a stored credential using its refresh token.\nIf the refresh token is revoked/expired, falls back to the interactive re-login flow (use --no-login to disable).\nExamples:\n  asx refresh claude jn.claude\n  asx refresh codex ed.codex')
+  .option('--no-login', 'Do not fall back to the interactive login flow when the refresh token is dead')
+  .action(async (provider: string, name: string, opts: { login?: boolean }) => {
     const { normalizeProvider } = await import('./providers/index.js');
     const prov = normalizeProvider(provider) || provider.toLowerCase();
     let adapter: any;
@@ -401,8 +393,16 @@ program
     if (!adapter.refresh) { console.error(chalk.red(`Refresh not supported for '${prov}'.`)); process.exit(1); }
     if (!getAccountByName(name)) { console.error(chalk.red(`No account found with name "${name}"`)); process.exit(1); }
     const r = await adapter.refresh(name);
-    console.log(r.ok ? chalk.green(`✓ ${name}: ${r.message}`) : chalk.red(`✗ ${name}: ${r.message}`));
-    process.exit(r.ok ? 0 : 1);
+    if (r.ok) { console.log(chalk.green(`✓ ${name}: ${r.message}`)); process.exit(0); }
+
+    console.log(chalk.red(`✗ ${name}: ${r.message}`));
+    // Token dead → offer the interactive re-login flow (explicit command only).
+    if (r.needsRelogin && opts.login !== false) {
+      console.log(chalk.yellow(`\nRefresh token can't be used. Starting re-login for ${prov}/${name}...`));
+      const ok = await runLoginFlow(prov, adapter, name);
+      process.exit(ok ? 0 : 1);
+    }
+    process.exit(1);
   });
 
 function getBypassFlags(provider: string): string[] {
