@@ -6,6 +6,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { getAdapter, listKnownProviders } from './providers/index.js';
+import * as provIndex from './providers/index.js';
 import { listAccounts, getActive, getAccountByName } from './storage/account-store.js';
 import { getSecret } from './storage/secure-store.js';
 import { dlog } from './utils/log.js';
@@ -54,6 +55,23 @@ async function ensureFresh(provider: string, name: string, verbose = false): Pro
     return r.ok;
   } catch { return true; }
 }
+
+// Resolve (provider, name) from up to two positional args where provider is optional.
+//   (a, b)  -> provider=a, name=b            (explicit provider)
+//   (name)  -> look up the profile by name   -> provider from the stored account
+//   (prov)  -> provider=a, name=undefined    (e.g. `login claude` for a fresh login)
+function resolveProviderName(a?: string, b?: string): { provider?: string; name?: string } {
+  const norm = (p?: string) => (p ? (normalizeProviderSync(p) || p.toLowerCase()) : undefined);
+  if (a && b) return { provider: norm(a), name: b };
+  if (!a) return {};
+  if (isKnownProviderSync(a)) return { provider: norm(a) };
+  const acct = getAccountByName(a);
+  if (acct) return { provider: acct.provider, name: a };
+  return { provider: norm(a) }; // unknown token; treat as provider and let downstream error
+}
+// sync wrappers around the (already-sync) provider helpers, imported lazily elsewhere
+function normalizeProviderSync(p: string): string | undefined { return provIndex.normalizeProvider(p); }
+function isKnownProviderSync(p: string): boolean { return provIndex.isKnownProvider(p); }
 
 const program = new Command();
 
@@ -290,27 +308,30 @@ async function runLoginFlow(p: string, adapter: any, name?: string): Promise<boo
 }
 
 program
-  .command('login <provider> [name]')
-  .description('Save current session (non-destructively), clear local provider session, launch native login flow, then load the new session.')
-  .action(async (provider: string, name?: string) => {
-    const p = provider.toLowerCase();
+  .command('login [provider] [name]')
+  .description('Save current session (non-destructively), clear local provider session, launch native login flow, then load the new session.\nProvider is optional when a profile name identifies it: asx login jn.claude')
+  .action(async (a?: string, b?: string) => {
+    const { provider, name } = resolveProviderName(a, b);
+    if (!provider) { console.error(chalk.red('Specify a provider or a profile name. e.g. asx login claude | asx login jn.claude')); process.exit(1); }
     let adapter: any;
     try {
-      adapter = getAdapter(p);
+      adapter = getAdapter(provider);
     } catch (e: any) {
       console.error(chalk.red(e.message || e));
       return;
     }
-    await runLoginFlow(p, adapter, name);
+    await runLoginFlow(provider, adapter, name);
   });
 
 program
-  .command('switch <provider> <name>')
+  .command('switch <nameOrProvider> [name]')
   .alias('s')
-  .description('Switch the active credential for provider to the named account')
-  .action(async (provider: string, name: string) => {
-    const adapter = getAdapter(provider);
+  .description('Switch the active credential to the named account.\nProvider is optional when the profile name identifies it: asx switch ed.codex')
+  .action(async (a: string, b?: string) => {
+    const { provider, name } = resolveProviderName(a, b);
+    if (!provider || !name) { console.error(chalk.red('Specify a profile name. e.g. asx switch ed.codex | asx switch codex ed.codex')); process.exit(1); }
     try {
+      const adapter = getAdapter(provider);
       await adapter.switchTo(name);
       console.log(chalk.green(`Switched ${provider} -> ${name}`));
     } catch (e: any) {
@@ -391,14 +412,14 @@ program
   });
 
 program
-  .command('refresh <provider> <name>')
-  .description('Refresh (rotate) a stored credential using its refresh token.\nIf the refresh token is revoked/expired, falls back to the interactive re-login flow (use --no-login to disable).\nExamples:\n  asx refresh claude jn.claude\n  asx refresh codex ed.codex')
+  .command('refresh <nameOrProvider> [name]')
+  .description('Refresh (rotate) a stored credential using its refresh token.\nProvider is optional when the profile name identifies it: asx refresh jn.claude\nIf the refresh token is revoked/expired, falls back to the interactive re-login flow (use --no-login to disable).\nExamples:\n  asx refresh jn.claude\n  asx refresh claude jn.claude\n  asx refresh codex ed.codex')
   .option('--no-login', 'Do not fall back to the interactive login flow when the refresh token is dead')
-  .action(async (provider: string, name: string, opts: { login?: boolean }) => {
-    const { normalizeProvider } = await import('./providers/index.js');
-    const prov = normalizeProvider(provider) || provider.toLowerCase();
+  .action(async (a: string, b: string | undefined, opts: { login?: boolean }) => {
+    const { provider: prov, name } = resolveProviderName(a, b);
+    if (!prov || !name) { console.error(chalk.red('Specify a profile name. e.g. asx refresh jn.claude | asx refresh claude jn.claude')); process.exit(1); }
     let adapter: any;
-    try { adapter = getAdapter(prov); } catch { console.error(chalk.red(`Unknown provider: ${provider}`)); process.exit(1); }
+    try { adapter = getAdapter(prov); } catch { console.error(chalk.red(`Unknown provider: ${prov}`)); process.exit(1); }
     if (!adapter.refresh) { console.error(chalk.red(`Refresh not supported for '${prov}'.`)); process.exit(1); }
     if (!getAccountByName(name)) { console.error(chalk.red(`No account found with name "${name}"`)); process.exit(1); }
     const r = await adapter.refresh(name);
