@@ -100,12 +100,14 @@ flowchart TD
   Config["ASX config dir"]
   Accounts["accounts.json<br/>provider, name, label, email, addedAt"]
   Active[".active.json<br/>provider -> active profile name"]
+  SecureStore["secure-store.ts"]
   Keychain["platform keychain<br/>service=asx, account=vault"]
   VaultFile["fallback vault.json<br/>provider:name -> raw credential"]
 
   Config --> Accounts
   Config --> Active
-  Keychain -. "fallback only when unavailable" .-> VaultFile
+  SecureStore --> Keychain
+  SecureStore -. "fallback only when unavailable" .-> VaultFile
 ```
 
 The credential vault is the platform keychain by default:
@@ -122,6 +124,32 @@ A `0600` file vault is only used when keychain storage is unavailable:
 ```
 
 Existing file vaults are migrated into the keychain on the next read or write. After a successful keychain write, the fallback file is removed.
+
+### Vault vs Provider-Native State
+
+The ASX vault stores profile credentials. Provider-native state is what the original tool reads when it runs normally.
+
+```mermaid
+flowchart TD
+  Vault["ASX vault<br/>platform keychain"]
+
+  ClaudeNative["Claude native state<br/>macOS Keychain or .credentials.json"]
+  CodexNative["Codex native state<br/>CODEX_HOME/auth.json"]
+  GrokNative["Grok native state<br/>GROK_HOME/auth.json"]
+  ZaiNative["ZAI<br/>no native agent state"]
+
+  Vault -- "switch claude" --> ClaudeNative
+  Vault -- "switch codex" --> CodexNative
+  Vault -- "switch grok" --> GrokNative
+  Vault -- "switch zai updates ASX marker/env only" --> ZaiNative
+
+  ClaudeNative -- "load/login" --> Vault
+  CodexNative -- "load/login" --> Vault
+  GrokNative -- "load/login" --> Vault
+  ZaiNative -- "login API key" --> Vault
+```
+
+`exec` usually avoids mutating provider-native state by copying the profile credential into an isolated runtime directory.
 
 ### Provider Adapters
 
@@ -180,6 +208,8 @@ GET https://api.z.ai/api/coding/paas/v4/models
 Then it stores the key in the ASX vault.
 
 `asx load zai` can also read `ZAI_API_KEY` or `ZAI_KEY` from the environment.
+
+ZAI `switch` cannot write to a native agent config because ASX does not manage a ZAI native agent. It updates ASX's active marker and exposes `ZAI_API_KEY` inside the current process.
 
 ## Isolated Execution
 

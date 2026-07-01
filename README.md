@@ -50,10 +50,12 @@ asx load
 asx load claude work
 asx load codex personal
 
-# Better multi-account flow (saves existing without expiry)
+# Better multi-account flow (saves existing sessions before login)
 asx login codex work
 asx login claude work
 asx login claude personal --long-lived
+asx login grok work
+asx login zai work
 
 # Switch
 asx switch claude personal
@@ -70,10 +72,11 @@ asx e ed.codex "refactor this function"
 # Run with automatic full-access bypass for the provider
 asx e ed.codex -b "do dangerous things"
 
-# Cross-provider via ASX Proxy (profile provider != target)
-# e.g. run Codex CLI but route through Claude backend (or xai/zai)
+# Cross-provider via ASX Proxy (profile provider != target agent)
+# e.g. run Codex CLI but route through Claude, Grok, or ZAI backend
 asx e ed.codex claude "refactor using claude"
 asx e ed.claude xai "explain with grok"
+asx e personal.zai codex "use ZAI through Codex UI"
 ```
 
 ## 📋 Commands
@@ -103,15 +106,28 @@ More providers can be added easily via the adapter pattern.
 
 ## 🔐 How It Works
 
-- Credentials are stored in **one** platform keychain vault item (`service=asx`, `account=vault`). A `0600` file vault is used only as fallback when keychain storage is unavailable.
-- `asx load` (or `asx login`) reads the currently active credential from the provider's storage (keychain / `~/.codex/auth.json` / `~/.grok/auth.json` etc.) and saves it in the vault (with email).
+### ASX Vault vs Native Provider State
+
+- ASX stores profile credentials in **one** platform keychain vault item (`service=asx`, `account=vault`). A `0600` file vault is used only as fallback when keychain storage is unavailable.
+- Provider native state is separate from the ASX vault:
+  - Claude native credential: Claude Keychain item on macOS, `.credentials.json` on Linux/Windows.
+  - Codex native credential: `CODEX_HOME/auth.json`.
+  - Grok native credential: `GROK_HOME/auth.json`.
+  - ZAI native credential: no native agent state; ASX stores the API key.
+- `asx load` reads the currently active provider-native credential and saves a profile copy in the ASX vault.
+- `asx switch` writes a stored profile back to provider-native state when the provider has one. ZAI only updates ASX's active marker and process env for the current command.
+- Existing fallback `vault.json` files are migrated into the platform keychain on the next ASX vault read or write, then removed after a successful keychain write.
+
+### Login And Execution
+
 - `asx login claude [name]` runs `claude auth login` with a profile-scoped `CLAUDE_CONFIG_DIR`, then stores the resulting access/refresh credential in the asx vault without touching Claude's global Keychain credential.
 - `asx login claude [name] --long-lived` runs `claude setup-token`, asks for the long-lived token, and stores it in the asx vault for `CLAUDE_CODE_OAUTH_TOKEN` execution.
-- `asx login <provider>` for other providers first snapshots the existing session (without calling logout), clears only the *local* credential, then runs the native login flow and loads the new one.
-- `switch` (or `s`) writes file/keychain credentials back to the provider's native location. Claude long-lived token profiles only update asx's active marker; `exec` injects `CLAUDE_CODE_OAUTH_TOKEN`.
+- `asx login codex [name]` and `asx login grok [name]` first snapshot the existing session, clear only the provider-native credential, run the native login flow, then load the new credential.
+- `asx login zai [name]` asks for an API key, validates it with `GET https://api.z.ai/api/coding/paas/v4/models`, then stores it in the ASX vault.
+- Claude long-lived token profiles only update ASX's active marker on `switch`; `exec` injects `CLAUDE_CODE_OAUTH_TOKEN`.
 - `exec` / `e` runs the native CLI **isolated** from other terminals:
   - Claude native access/refresh profiles use a stable profile-scoped runtime `CLAUDE_CONFIG_DIR` so concurrent sessions share Claude's own credential file.
-  - Other isolated runs write a copy of the credential into a temp directory, set `CODEX_HOME` / `CLAUDE_CONFIG_DIR` / `GROK_HOME` etc., spawn the native tool, and delete the temp dir on exit.
+  - Other isolated runs write a copy of the credential into a temp directory, set `CODEX_HOME` / `GROK_HOME` etc., spawn the native tool, and delete the temp dir on exit.
   - `-b / --bypass` automatically injects the appropriate full-access flags for the provider.
 - `list` (and `list -u`) detects the *live* credential currently loaded in the system (keychain/auth files) and annotates the matching stored account with `(current in system)`.
 - Usage bars (via `list -u`) use the same live mechanisms as [openusage](https://github.com/janekbaraniewski/openusage) where possible.
