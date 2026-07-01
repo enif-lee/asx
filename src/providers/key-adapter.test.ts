@@ -154,4 +154,23 @@ describe('grok home', () => {
       else process.env.ASX_ZAI_API_KEY = prev;
     }
   });
+
+  it('reads ZAI usage from the monitor quota endpoint', async () => {
+    state.saved = { provider: 'zai', name: 'acct', value: 'zai-key' };
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response(JSON.stringify({
+      data: { limits: [{ type: 'TOKENS_LIMIT', percentage: 25 }] },
+    }), { status: 200 }));
+
+    try {
+      const usage = await createKeyAdapter('zai').getUsage?.('acct');
+
+      expect(fetchSpy).toHaveBeenCalledWith('https://api.z.ai/api/monitor/usage/quota/limit', expect.any(Object));
+      const init = fetchSpy.mock.calls[0][1] as RequestInit;
+      expect((init.headers as any).Authorization).toBe('zai-key');
+      expect(usage).toContain('5h:');
+      expect(usage).toContain('75.0% / 25.0%');
+    } finally {
+      fetchSpy.mockRestore();
+    }
+  });
 });

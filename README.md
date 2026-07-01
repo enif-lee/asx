@@ -99,7 +99,7 @@ asx e personal.zai codex "use ZAI through Codex UI"
 | Claude Code  | `claude`       | Native access/refresh tokens in isolated `CLAUDE_CONFIG_DIR`; optional long-lived `CLAUDE_CODE_OAUTH_TOKEN` | 5h / 7d bars (accurate)   |
 | Codex        | `codex`        | `~/.codex/auth.json` (respects `$CODEX_HOME`)     | 5h / 7d windows           |
 | Grok / xAI   | `grok`         | Native `grok login`; `~/.grok/auth.json` (respects `$GROK_HOME`) | Credits + rate limits     |
-| Z.AI         | `zai`          | API key via `asx login zai`; `ZAI_API_KEY`/`ZAI_KEY` for `asx load` | Basic key info            |
+| Z.AI         | `zai`          | API key via `asx login zai`; `ZAI_API_KEY`/`ZAI_KEY` for `asx load` | 5h quota via monitor API  |
 | Cursor       | `cursor`       | Metadata only (limited)                           | Metadata only             |
 
 More providers can be added easily via the adapter pattern.

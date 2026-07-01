@@ -207,6 +207,12 @@ Then it stores the key in the ASX vault.
 
 `asx load zai` can also read `ZAI_API_KEY` or `ZAI_KEY` from the environment.
 
+`asx list zai -u` reads 5-hour quota from:
+
+```text
+GET https://api.z.ai/api/monitor/usage/quota/limit
+```
+
 ZAI `switch` cannot write to a native agent config because ASX does not manage a ZAI native agent. It updates ASX's active marker and exposes `ZAI_API_KEY` inside the current process.
 
 ## Isolated Execution

@@ -7,6 +7,7 @@ import { ensureDirFor, getGrokAuthPath } from '../utils/platform.js';
 import type { ProviderAdapter } from './base.js';
 
 const ZAI_BASE_URL = 'https://api.z.ai/api/coding/paas/v4';
+const ZAI_QUOTA_URL = 'https://api.z.ai/api/monitor/usage/quota/limit';
 
 function getEnvKey(provider: string): string | undefined {
   const prefix = provider.toUpperCase();
@@ -70,6 +71,12 @@ function tryExtractGrokEmail(): string | undefined {
 function parseGrokTokenInfo(token: string): any {
   if (!token || !token.startsWith('ey')) return null;
   return decodeJwtClaims(token);
+}
+
+function parsePercent(value: any): number | null {
+  const n = typeof value === 'number' ? value : Number.parseFloat(String(value ?? ''));
+  if (!Number.isFinite(n)) return null;
+  return n <= 1 && !String(value).trim().endsWith('%') ? n * 100 : n;
 }
 
 async function testZaiKey(key: string): Promise<void> {
@@ -267,7 +274,28 @@ export function createKeyAdapter(provider: string): ProviderAdapter {
           return `${lines[0]}${suffix}\n  ${lines.slice(1).join('\n  ')}`;
         }
 
-        // generic key provider (e.g. zai) - minimal info
+        if (provider === 'zai') {
+          const res = await fetch(ZAI_QUOTA_URL, {
+            headers: {
+              Authorization: key,
+              'Accept-Language': 'en-US,en',
+              'Content-Type': 'application/json',
+            },
+          });
+          if (!res.ok) return `ZAI usage fetch failed: ${res.status}${suffix}`;
+
+          const payload: any = await res.json();
+          const limits = payload?.data?.limits || payload?.limits || [];
+          const tokenLimit = Array.isArray(limits) ? limits.find((x: any) => x?.type === 'TOKENS_LIMIT') : null;
+          const usedPct = parsePercent(tokenLimit?.percentage);
+          if (usedPct == null) return `ZAI usage (no token quota returned)${suffix}`;
+
+          const used = Math.max(0, Math.min(100, usedPct));
+          const rem = Math.max(0, 100 - used);
+          return `5h: ${renderBar(rem)} ${rem.toFixed(1)}% / ${used.toFixed(1)}%${suffix}`;
+        }
+
+        // generic key provider - minimal info
         return `API key stored${suffix}`;
       } catch (e: any) {
         return `API key fetch error: ${e.message || e}${suffix}`;
