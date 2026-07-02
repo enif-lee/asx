@@ -68,18 +68,23 @@ function readCurrentCredentials(): string | null {
 
   const plat = getPlatform();
   if (plat === 'darwin') {
-    try {
-      // Common service names used by Claude Code
-      const services = ['Claude Code-credentials', 'Claude Code - credentials', 'claude-code-credentials'];
-      for (const svc of services) {
-        try {
-          const out = execSync(`security find-generic-password -s ${JSON.stringify(svc)} -w`, {
-            encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore']
-          }).trim();
-          if (out) return out;
-        } catch {}
-      }
-    } catch {}
+    // Preferred on macOS: the login Keychain.
+    const services = ['Claude Code-credentials', 'Claude Code - credentials', 'claude-code-credentials'];
+    for (const svc of services) {
+      try {
+        const out = execSync(`security find-generic-password -s ${JSON.stringify(svc)} -w`, {
+          encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore']
+        }).trim();
+        if (out) return out;
+      } catch {}
+    }
+    // Fallback: newer Claude Code builds (and sandboxed/keychain-less setups) keep the
+    // credentials in ~/.claude/.credentials.json instead of the Keychain. Without this,
+    // `asx load claude` fails with "No active Claude Code credentials found" even though
+    // the user is logged in.
+    if (fs.existsSync(filePath)) {
+      try { return fs.readFileSync(filePath, 'utf8'); } catch { return null; }
+    }
     return null;
   }
   // Linux / Win file
@@ -96,11 +101,23 @@ function writeActiveCredentials(raw: string): void {
     const account = process.env.USER || 'user';
     // Write under the service claude actually reads
     const svc = 'Claude Code-credentials';
+    let wroteKeychain = false;
     try {
       execSync(`security add-generic-password -s ${JSON.stringify(svc)} -a ${JSON.stringify(account)} -w ${JSON.stringify(raw)} -U`, { stdio: 'ignore' });
+      wroteKeychain = true;
     } catch (e) {
-      // fallback to our store only
       console.error('Warning: failed to write Claude Keychain item directly');
+    }
+    // Mirror to the file-based store so `switch` actually takes effect for the builds that
+    // read ~/.claude/.credentials.json (see readCurrentCredentials). Also our only channel
+    // when the Keychain write failed.
+    const p = getClaudeCredentialsPath();
+    if (!wroteKeychain || fs.existsSync(p)) {
+      try {
+        ensureDirFor(p);
+        fs.writeFileSync(p, raw);
+        fs.chmodSync(p, 0o600);
+      } catch {}
     }
     return;
   }
