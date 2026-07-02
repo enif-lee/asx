@@ -1,5 +1,6 @@
 import { describe, it, expect } from 'vitest';
-import { forEachUpstreamEvent, startProxy } from './server.js';
+import { forEachUpstreamEvent, startProxy, fetchUpstreamWithRetry } from './server.js';
+import { zaiBackend } from './adapters/zai.js';
 import type { CommonEvent } from './types.js';
 
 // Fake backend: each SSE block "data: <text>" -> text event; "data: [DONE]" -> done.
@@ -56,6 +57,56 @@ describe('forEachUpstreamEvent', () => {
     const evs: CommonEvent[] = [];
     await forEachUpstreamEvent(null, backend, (e) => evs.push(e));
     expect(evs).toEqual([]);
+  });
+});
+
+describe('fetchUpstreamWithRetry', () => {
+  const up = { url: 'http://x', headers: {}, body: '{}' };
+  const noSleep = async () => {};
+  const stream = () => new Response('data: hi\n\n', { status: 200, headers: { 'content-type': 'text/event-stream' } });
+  const overload200 = () => new Response(JSON.stringify({ error: { code: '1305', message: 'overloaded' } }), { status: 200, headers: { 'content-type': 'application/json' } });
+  const overload503 = () => new Response('service unavailable', { status: 503 });
+
+  it('delegates a 200-with-1305 body to backend.isRetryable and retries until it streams', async () => {
+    let n = 0;
+    const fetchImpl = (async () => (++n < 3 ? overload200() : stream())) as any;
+    const { res, errText } = await fetchUpstreamWithRetry(up, zaiBackend, { fetchImpl, sleep: noSleep });
+    expect(n).toBe(3);
+    expect(errText).toBeUndefined();
+    expect(res.ok).toBe(true);
+  });
+
+  it('retries a 503 by generic status even without a backend', async () => {
+    let n = 0;
+    const fetchImpl = (async () => (++n < 2 ? overload503() : stream())) as any;
+    const { errText } = await fetchUpstreamWithRetry(up, undefined, { fetchImpl, sleep: noSleep });
+    expect(n).toBe(2);
+    expect(errText).toBeUndefined();
+  });
+
+  it('gives up after retries and returns the last error body', async () => {
+    let n = 0;
+    const fetchImpl = (async () => { n++; return overload200(); }) as any;
+    const { errText } = await fetchUpstreamWithRetry(up, zaiBackend, { retries: 2, fetchImpl, sleep: noSleep });
+    expect(n).toBe(3); // 1 try + 2 retries
+    expect(errText).toContain('1305');
+  });
+
+  it('does not retry a 200-with-1305 when the backend has no isRetryable hook', async () => {
+    let n = 0;
+    const fetchImpl = (async () => { n++; return overload200(); }) as any;
+    const { res } = await fetchUpstreamWithRetry(up, {}, { fetchImpl, sleep: noSleep });
+    expect(n).toBe(1);
+    expect(res.status).toBe(200);
+  });
+
+  it('does not retry a non-retryable 400', async () => {
+    let n = 0;
+    const fetchImpl = (async () => { n++; return new Response('bad request', { status: 400 }); }) as any;
+    const { res, errText } = await fetchUpstreamWithRetry(up, zaiBackend, { fetchImpl, sleep: noSleep });
+    expect(n).toBe(1);
+    expect(res.status).toBe(400);
+    expect(errText).toBe('bad request');
   });
 });
 

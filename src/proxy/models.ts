@@ -28,7 +28,15 @@ function defaults(provider: string): BackendChoice[] {
     return ['grok-build'].map((m) => ({ id: m, model: m }));
   }
   if (p === 'zai') {
-    return ['glm-5.2', 'glm-5-turbo', 'glm-4.7', 'glm-4.5-air'].map((m) => ({ id: m, model: m }));
+    // Per z.ai docs: glm-5.2 (coding default), glm-5.2[1m] (1M context), glm-4.5-air (fast).
+    // effort maps to GLM thinking: any effort -> thinking enabled (see zai backend). glm-4.5-air
+    // stays non-thinking. Override with ASX_ZAI_MODELS / models.json.
+    return [
+      { id: 'glm-5.2', model: 'glm-5.2', effort: 'high' },
+      { id: 'glm-5.2-max', model: 'glm-5.2', effort: 'max' },
+      { id: 'glm-5.2[1m]', model: 'glm-5.2[1m]', effort: 'high' },
+      { id: 'glm-4.5-air', model: 'glm-4.5-air' },
+    ];
   }
   return [{ id: 'asx-proxy', model: 'asx-proxy' }];
 }

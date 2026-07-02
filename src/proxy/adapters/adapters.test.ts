@@ -2,7 +2,7 @@ import { describe, it, expect } from 'vitest';
 import { grokAgent, grokBackend } from './grok.js';
 import { codexAgent, codexBackend } from './codex.js';
 import { claudeAgent, claudeBackend } from './claude.js';
-import { zaiBackend } from './zai.js';
+import { zaiBackend, isZaiOverload } from './zai.js';
 import type { StreamCtx, CommonEvent } from '../types.js';
 
 const ctx = (model = 'm'): StreamCtx => ({ id: 'id1', created: 1, model, first: true });
@@ -105,13 +105,31 @@ describe('claude agent done-only', () => {
 describe('zai backend (OpenAI chat completions)', () => {
   it('uses the coding endpoint and maps model ids', () => {
     const { url, headers, body } = zaiBackend.buildRequest(
-      { model: 'glm-4.7', system: 'S', messages: [{ role: 'user', content: 'hi' }], stream: true } as any,
+      { model: 'glm-5.2[1m]', system: 'S', messages: [{ role: 'user', content: 'hi' }], stream: true } as any,
       'zai-key',
     );
     const b = JSON.parse(body);
     expect(url).toBe('https://api.z.ai/api/coding/paas/v4/chat/completions');
     expect(headers.Authorization).toBe('Bearer zai-key');
-    expect(b.model).toBe('glm-4.7');
+    expect(b.model).toBe('glm-5.2[1m]');
     expect(b.messages[0]).toEqual({ role: 'system', content: 'S' });
+  });
+
+  it('forwards thinking for an effort-bearing model, omits it for glm-4.5-air', () => {
+    const withEffort = JSON.parse(zaiBackend.buildRequest(
+      { model: 'glm-5.2', messages: [{ role: 'user', content: 'hi' }], stream: true } as any, 'k',
+    ).body);
+    expect(withEffort.thinking).toEqual({ type: 'enabled' });
+
+    const air = JSON.parse(zaiBackend.buildRequest(
+      { model: 'glm-4.5-air', messages: [{ role: 'user', content: 'hi' }], stream: true } as any, 'k',
+    ).body);
+    expect(air.thinking).toBeUndefined();
+  });
+
+  it('flags z.ai overload codes/messages as retryable', () => {
+    expect(isZaiOverload('{"error":{"code":"1305","message":"overloaded"}}')).toBe(true);
+    expect(zaiBackend.isRetryable!(200, '{"error":{"code":"1305"}}')).toBe(true);
+    expect(isZaiOverload('{"choices":[]}')).toBe(false);
   });
 });

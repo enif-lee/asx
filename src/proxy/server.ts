@@ -54,19 +54,19 @@ export async function startProxy(options: ProxyStartOptions): Promise<ProxyHandl
       dlog(`[asx-proxy] req model=${common.model} msgs=${common.messages.length} stream=${common.stream} prompt~="${(common.messages.at(-1)?.content || '').slice(0, 50)}"`);
 
       const up = backend.buildRequest(common, cred);
-      // Guard against an upstream that never responds/closes.
-      const timeout = AbortSignal.timeout ? AbortSignal.timeout(120_000) : undefined;
-      const upstreamRes = await fetch(up.url, { method: 'POST', headers: up.headers, body: up.body, signal: timeout });
+      // Retries transient overload (HTTP 429/5xx or an overload code like z.ai 1305, even on a 200).
+      const { res: upstreamRes, errText } = await fetchUpstreamWithRetry(up, backend);
       dlog(`[asx-proxy] upstream ${up.url} -> ${upstreamRes.status}`);
 
       const ctx: StreamCtx = { id: 'chatcmpl-asx-' + reqId, created: Math.floor(Date.now() / 1000), model: common.model, first: true };
 
-      // Upstream error: consume the body once for the message, surface it to the agent's
-      // output (not a 500), and return — never fall through to re-read the locked stream.
-      if (!upstreamRes.ok) {
-        const errText = await upstreamRes.text().catch(() => '');
-        dlog(`[asx-proxy] upstream error ${upstreamRes.status}: ${errText.slice(0, 300)}`);
-        const msg = `[asx-proxy] backend ${backendProvider} error ${upstreamRes.status}: ${errText.slice(0, 300)}`;
+      // errText is set only when the body was already read (an error / non-stream response) —
+      // surface it to the agent's output (not a 500), and return. On the happy stream path
+      // errText is undefined and the SSE body below is untouched.
+      if (!upstreamRes.ok || errText != null) {
+        const detail = (errText ?? '').slice(0, 300);
+        dlog(`[asx-proxy] upstream error ${upstreamRes.status}: ${detail}`);
+        const msg = `[asx-proxy] backend ${backendProvider} error ${upstreamRes.status}: ${detail}`;
         if (common.stream) {
           res.writeHead(200, agent.streamHeaders());
           res.write(agent.formatStreamChunk({ type: 'text', text: msg }, ctx));
@@ -177,6 +177,51 @@ export function toolAccumulator() {
     },
     clear() { byIndex.clear(); order.length = 0; },
   };
+}
+
+// Backends transiently reject with an overload/rate error. HTTP-level failures (network errors,
+// 429/5xx) are universal and retried here; provider-specific body cases (e.g. z.ai's 200-with-1305)
+// are delegated to backend.isRetryable. Retries use exponential backoff + jitter.
+const RETRYABLE_STATUS = new Set([408, 429, 500, 502, 503, 504]);
+
+export async function fetchUpstreamWithRetry(
+  up: { url: string; headers: Record<string, string>; body: string },
+  backend?: { isRetryable?(status: number, body: string): boolean },
+  opts: { retries?: number; fetchImpl?: typeof fetch; sleep?: (ms: number) => Promise<void> } = {},
+): Promise<{ res: Response; errText?: string }> {
+  const retries = opts.retries ?? 4;
+  const doFetch = opts.fetchImpl ?? fetch;
+  const sleep = opts.sleep ?? ((ms: number) => new Promise<void>((r) => setTimeout(r, ms)));
+  let lastRes: Response | undefined;
+  let lastText = '';
+  for (let attempt = 0; attempt <= retries; attempt++) {
+    if (attempt > 0) {
+      const backoff = Math.min(8000, 500 * 2 ** (attempt - 1)) + Math.floor(Math.random() * 250);
+      dlog(`[asx-proxy] retry ${attempt}/${retries} after ${backoff}ms (overload)`);
+      await sleep(backoff);
+    }
+    // Guard against an upstream that never responds/closes.
+    const timeout = AbortSignal.timeout ? AbortSignal.timeout(120_000) : undefined;
+    let res: Response;
+    try {
+      res = await doFetch(up.url, { method: 'POST', headers: up.headers, body: up.body, signal: timeout });
+    } catch (e: any) {
+      lastText = e?.message || 'network error'; // network failure is retryable
+      continue;
+    }
+    lastRes = res;
+    const ct = res.headers.get('content-type') || '';
+    // Happy path: a streaming body — hand it back untouched so the caller can pipe it.
+    if (res.ok && ct.includes('event-stream')) return { res };
+    // Otherwise read the (small) body to inspect for an overload code / non-stream error.
+    const text = await res.text().catch(() => '');
+    lastText = text;
+    const retryable = RETRYABLE_STATUS.has(res.status) || !!backend?.isRetryable?.(res.status, text);
+    if (attempt < retries && retryable) continue;
+    return { res, errText: text };
+  }
+  if (!lastRes) throw new Error(lastText || 'upstream fetch failed'); // only network errors, no Response
+  return { res: lastRes, errText: lastText };
 }
 
 async function readBody(req: http.IncomingMessage): Promise<string> {

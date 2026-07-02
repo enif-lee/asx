@@ -85,6 +85,10 @@ export interface BackendAdapter {
   buildRequest(req: CommonRequest, cred: string): { url: string; headers: Record<string, string>; body: string };
   // Parse one upstream SSE event block into COMMON events.
   parseStreamChunk(eventBlock: string): CommonEvent[];
+  // Provider-specific retry decision from a non-stream response (e.g. z.ai returns a 200 whose
+  // body carries {"error":{"code":"1305"}} on overload). The server already retries generic
+  // transport failures (network errors, 429/5xx); this only adds per-provider body cases.
+  isRetryable?(status: number, body: string): boolean;
 }
 
 export interface StreamCtx {
