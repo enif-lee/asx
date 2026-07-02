@@ -8,6 +8,7 @@ import path from 'node:path';
 import { getAdapter, listKnownProviders } from './providers/index.js';
 import * as provIndex from './providers/index.js';
 import { getClaudeCodeOAuthToken, isClaudeCodeLongLivedToken } from './providers/claude-code.js';
+import { getAsxTmpBase } from './utils/platform.js';
 import { listAccounts, getActive, getAccountByName } from './storage/account-store.js';
 import { getSecret, setSecret } from './storage/secure-store.js';
 import { dlog } from './utils/log.js';
@@ -76,7 +77,7 @@ function stableAgentHome(provider: string, accountName: string, sub: string): st
   const uid = typeof process.getuid === 'function' ? process.getuid() : 'user';
   const homeScope = Buffer.from(os.homedir()).toString('base64url').slice(0, 16) || 'home';
   const safeName = `${provider}-${accountName}`.replace(/[^a-zA-Z0-9_.-]/g, '_');
-  const root = path.join(os.tmpdir(), `asx-${uid}-${homeScope}-runtime`);
+  const root = path.join(getAsxTmpBase(), `asx-${uid}-${homeScope}-runtime`);
   const dir = path.join(root, safeName, sub);
   fs.mkdirSync(dir, { recursive: true });
   for (const p of [root, path.dirname(dir), dir]) {
@@ -578,7 +579,7 @@ program
 
     // Reuse the exec injection to produce the exact config/env the frontend needs, into a
     // persistent dir, then tell the user which env vars to export to use it.
-    const dir = fs.mkdtempSync(path.join(os.tmpdir(), `asx-proxy-${frontendProvider}-`));
+    const dir = fs.mkdtempSync(path.join(getAsxTmpBase(), `asx-proxy-${frontendProvider}-`));
     // Clean the temp dir on any exit (normal, crash, uncaught), not just Ctrl+C.
     process.on('exit', () => { try { fs.rmSync(dir, { recursive: true, force: true }); } catch {} });
     const injected: NodeJS.ProcessEnv = {};
@@ -721,7 +722,7 @@ program
         const d = useClaudeNativeFile
           ? stableAgentHome(profileProvider, accountName, spec.sub)
           : (() => {
-              tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), `asx-${accountName.replace(/[^a-zA-Z0-9_-]/g, '_')}-`));
+              tmpDir = fs.mkdtempSync(path.join(getAsxTmpBase(), `asx-${accountName.replace(/[^a-zA-Z0-9_-]/g, '_')}-`));
               fs.chmodSync(tmpDir, 0o700);
               const p = path.join(tmpDir, spec.sub);
               fs.mkdirSync(p, { recursive: true });

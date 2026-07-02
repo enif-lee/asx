@@ -17,9 +17,9 @@ vi.mock('node:child_process', () => ({
     state.execFileCalls += 1;
     const input = String(opts?.input || '');
     if (input.includes('/api/oauth/profile')) {
-      return JSON.stringify({ account: { has_claude_max: true }, organization: { organization_type: 'pro' } }) + '\nASX_HTTP_STATUS:200';
+      return 'HTTP/2 200\r\n\r\n' + JSON.stringify({ account: { has_claude_max: true }, organization: { organization_type: 'pro' } }) + '\nASX_HTTP_STATUS:200';
     }
-    return JSON.stringify({ five_hour: { utilization: 25 } }) + '\nASX_HTTP_STATUS:200';
+    return 'HTTP/2 200\r\n\r\n' + JSON.stringify({ five_hour: { utilization: 25 } }) + '\nASX_HTTP_STATUS:200';
   }),
 }));
 
@@ -70,10 +70,7 @@ describe('claude long-lived token credentials', () => {
   });
 
   it('stores a long-lived token without native keychain credentials', async () => {
-    vi.stubGlobal('fetch', vi.fn(async () => ({
-      ok: true,
-      json: async () => ({ email: 'claude@example.com' }),
-    })));
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify({ email: 'claude@example.com' }), { status: 200 })));
 
     await claudeCodeAdapter.loadLongLivedToken!('acct.claude', ' long-token ');
 
@@ -127,5 +124,26 @@ describe('claude long-lived token credentials', () => {
     expect(usage).toContain('5h:');
     expect(usage).toContain('75.0% / 25.0%');
     expect(state.execFileCalls).toBe(2);
+  });
+
+  it('shows retry-after when Claude usage is rate limited', async () => {
+    state.saved = {
+      provider: 'claude',
+      name: 'acct.claude',
+      value: JSON.stringify({ type: 'claude-code-oauth-token', token: 'long-token' }),
+    };
+    vi.stubGlobal('fetch', vi.fn(async (input: string) => {
+      if (input.includes('/api/oauth/profile')) {
+        return new Response(JSON.stringify({ account: { has_claude_max: true }, organization: { organization_type: 'pro' } }), { status: 200 });
+      }
+      return new Response(JSON.stringify({ error: { type: 'rate_limit_error' } }), {
+        status: 429,
+        headers: { 'retry-after': '83' },
+      });
+    }));
+
+    const usage = await claudeCodeAdapter.getUsage!('acct.claude');
+
+    expect(usage).toContain('rate limited (HTTP 429), retry after 83s');
   });
 });

@@ -18,4 +18,20 @@ describe('injectProxyEndpoint', () => {
       fs.rmSync(tmp, { recursive: true, force: true });
     }
   });
+
+  it('remaps Claude built-in model slots to backend models and disables gateway discovery', async () => {
+    const env: NodeJS.ProcessEnv = {};
+    await injectProxyEndpoint('claude', env, 'http://127.0.0.1:9999', undefined, 'codex');
+    // gateway discovery must be OFF (we remap slots instead of appending a gateway section)
+    expect(env.CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY).toBeUndefined();
+    // codex backend choices are gpt-5.5-high/medium/low/xhigh -> opus/sonnet/haiku/fable slots
+    expect(env.ANTHROPIC_DEFAULT_OPUS_MODEL).toBe('gpt-5.5-high');
+    expect(env.ANTHROPIC_DEFAULT_OPUS_MODEL_NAME).toBe('gpt-5.5-high');
+    expect(env.ANTHROPIC_DEFAULT_SONNET_MODEL).toBe('gpt-5.5-medium');
+    expect(env.ANTHROPIC_DEFAULT_HAIKU_MODEL).toBe('gpt-5.5-low');
+    expect(env.ANTHROPIC_DEFAULT_FABLE_MODEL).toBe('gpt-5.5-xhigh');
+    // default session model is the first backend model, not Claude's Opus
+    expect(env.ANTHROPIC_MODEL).toBe('gpt-5.5-high');
+    expect(env.ANTHROPIC_BASE_URL).toBe('http://127.0.0.1:9999');
+  });
 });

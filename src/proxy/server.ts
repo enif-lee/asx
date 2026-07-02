@@ -27,14 +27,14 @@ export async function startProxy(options: ProxyStartOptions): Promise<ProxyHandl
 
     try {
       if (isModels) {
-        const data = backendChoices(backendProvider).map((m) => ({
-          id: m.id,
-          object: 'model',
-          created: 0,
-          owned_by: `asx-${backendProvider}`,
-        }));
+        const choices = backendChoices(backendProvider);
+        // Each agent CLI's `/model` picker wants a different models schema (codex ModelInfo,
+        // Anthropic models list, OpenAI list), so the agent adapter frames it.
+        const bodyOut = agent?.formatModels
+          ? agent.formatModels(choices)
+          : { object: 'list', data: choices.map((m) => ({ id: m.id, object: 'model', created: 0, owned_by: `asx-${backendProvider}` })) };
         res.writeHead(200, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({ object: 'list', data }));
+        res.end(JSON.stringify(bodyOut));
         return;
       }
 
@@ -82,22 +82,31 @@ export async function startProxy(options: ProxyStartOptions): Promise<ProxyHandl
       if (common.stream) {
         res.writeHead(200, agent.streamHeaders());
         let sawDone = false;
+        const tools = toolAccumulator();
+        // Tool calls arrive as fragments and complete only at stream end, so hold them
+        // until 'done', then emit each as a single complete tool_call the agent can frame.
+        const flush = () => { for (const t of tools.list()) res.write(agent.formatStreamChunk(t, ctx)); tools.clear(); };
         await forEachUpstreamEvent(upstreamRes.body, backend, (ev) => {
-          if (ev.type === 'done') sawDone = true;
+          if (ev.type === 'tool_call_delta') { tools.push(ev); return; }
+          if (ev.type === 'done') { flush(); sawDone = true; }
           res.write(agent.formatStreamChunk(ev, ctx));
         });
+        flush(); // stream may end without an explicit 'done'
         if (!sawDone) res.write(agent.formatStreamChunk({ type: 'done' }, ctx));
         res.end();
       } else {
         // Agent wanted non-stream; backend still streams — accumulate, then format once.
         let text = '';
         let finishReason: string | undefined;
+        const tools = toolAccumulator();
         await forEachUpstreamEvent(upstreamRes.body, backend, (ev) => {
           if (ev.type === 'text') text += ev.text;
+          else if (ev.type === 'tool_call_delta') tools.push(ev);
           else if (ev.type === 'done') finishReason = ev.finishReason;
         });
+        const toolCalls = tools.list().map((t) => ({ id: t.id, name: t.name, arguments: t.arguments }));
         res.writeHead(200, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify(agent.formatResponse({ text, finishReason }, common)));
+        res.end(JSON.stringify(agent.formatResponse({ text, toolCalls, finishReason }, common)));
       }
     } catch (err: any) {
       dlog('[asx-proxy] error:', err?.message || err);
@@ -145,6 +154,29 @@ export async function forEachUpstreamEvent(
   } finally {
     try { reader.releaseLock(); } catch {}
   }
+}
+
+// Merge streamed tool_call_delta fragments (keyed by wire index) into complete tool calls,
+// preserving first-seen order. id/name land on the opening fragment; args arrive in pieces.
+export function toolAccumulator() {
+  const byIndex = new Map<number, { id: string; name: string; args: string }>();
+  const order: number[] = [];
+  return {
+    push(ev: { index: number; id?: string; name?: string; argsDelta?: string }) {
+      let t = byIndex.get(ev.index);
+      if (!t) { t = { id: '', name: '', args: '' }; byIndex.set(ev.index, t); order.push(ev.index); }
+      if (ev.id) t.id = ev.id;
+      if (ev.name) t.name = ev.name;
+      if (ev.argsDelta) t.args += ev.argsDelta;
+    },
+    list(): Array<CommonEvent & { type: 'tool_call' }> {
+      return order.map((i) => {
+        const t = byIndex.get(i)!;
+        return { type: 'tool_call' as const, id: t.id, name: t.name, arguments: t.args };
+      });
+    },
+    clear() { byIndex.clear(); order.length = 0; },
+  };
 }
 
 async function readBody(req: http.IncomingMessage): Promise<string> {

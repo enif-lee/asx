@@ -3,23 +3,23 @@
 //   POST /v1/chat/completions  Authorization: Bearer <dummy>
 //   body { model, messages:[{role,content}], temperature, max_tokens, tools?, stream }
 //   stream response: strict chat.completion.chunk (id/object/created/model/choices required),
-//   terminated by `data: [DONE]`.
+//   terminated by `data: [DONE]`. Tool calls stream as delta.tool_calls[] and finish_reason=tool_calls.
 import type { AgentAdapter, BackendAdapter, CommonRequest, CommonEvent, CommonResponse, StreamCtx } from '../types.js';
 import { resolveChoice } from '../models.js';
-import { sseData as sse, sseHeaders, toText } from './util.js';
+import { sseData as sse, sseHeaders, toText, chatMessagesFromCommon, chatToolsFromCommon, chatMessagesToCommon, chatToolsToCommon, parseChatToolDeltas } from './util.js';
 
 export const grokAgent: AgentAdapter = {
   parseRequest(_path, body): CommonRequest {
     const msgs = Array.isArray(body.messages) ? body.messages : [];
     const system = msgs.filter((m: any) => m.role === 'system').map((m: any) => toText(m.content)).join('\n') || undefined;
-    const messages = msgs
-      .filter((m: any) => m.role !== 'system')
-      .map((m: any) => ({ role: m.role, content: toText(m.content) }));
+    const messages = chatMessagesToCommon(msgs.filter((m: any) => m.role !== 'system'));
     return {
       model: body.model || 'asx-proxy',
       system,
       messages,
-      tools: body.tools,
+      tools: chatToolsToCommon(body.tools),
+      toolChoice: body.tool_choice,
+      parallelToolCalls: body.parallel_tool_calls,
       stream: !!body.stream,
       maxTokens: body.max_tokens ?? body.max_completion_tokens,
       temperature: body.temperature,
@@ -29,26 +29,45 @@ export const grokAgent: AgentAdapter = {
   streamHeaders: sseHeaders,
 
   formatStreamChunk(ev: CommonEvent, ctx: StreamCtx): string {
+    if (ctx.nextIndex == null) ctx.nextIndex = 0;
+    if (!ctx.items) ctx.items = []; // records tool ids -> drives finish_reason
+    const chunk = (delta: any, finish: string | null) => sse({
+      id: ctx.id, object: 'chat.completion.chunk', created: ctx.created, model: ctx.model,
+      choices: [{ index: 0, delta, finish_reason: finish }],
+    });
     if (ev.type === 'text') {
       const delta: any = { content: ev.text };
       if (ctx.first) { delta.role = 'assistant'; ctx.first = false; }
-      return sse({ id: ctx.id, object: 'chat.completion.chunk', created: ctx.created, model: ctx.model,
-        choices: [{ index: 0, delta, finish_reason: null }] });
+      return chunk(delta, null);
+    }
+    if (ev.type === 'tool_call') {
+      const tcIndex = ctx.nextIndex!++;
+      ctx.items!.push(ev.id);
+      const delta: any = { tool_calls: [{ index: tcIndex, id: ev.id, type: 'function', function: { name: ev.name, arguments: ev.arguments || '' } }] };
+      if (ctx.first) { delta.role = 'assistant'; ctx.first = false; }
+      return chunk(delta, null);
     }
     if (ev.type === 'done') {
-      return sse({ id: ctx.id, object: 'chat.completion.chunk', created: ctx.created, model: ctx.model,
-        choices: [{ index: 0, delta: {}, finish_reason: ev.finishReason || 'stop' }] }) + 'data: [DONE]\n\n';
+      const reason = ctx.items!.length ? 'tool_calls' : (ev.finishReason || 'stop');
+      return chunk({}, reason) + 'data: [DONE]\n\n';
     }
     // error -> close the stream cleanly so the agent prints what it has
-    return sse({ id: ctx.id, object: 'chat.completion.chunk', created: ctx.created, model: ctx.model,
-      choices: [{ index: 0, delta: {}, finish_reason: 'stop' }] }) + 'data: [DONE]\n\n';
+    return chunk({}, 'stop') + 'data: [DONE]\n\n';
   },
 
   formatResponse(resp: CommonResponse, req: CommonRequest) {
+    const message: any = { role: 'assistant', content: resp.text || null };
+    if (resp.toolCalls?.length) {
+      message.tool_calls = resp.toolCalls.map((tc) => ({ id: tc.id, type: 'function', function: { name: tc.name, arguments: tc.arguments || '{}' } }));
+    }
     return {
       id: 'chatcmpl-asx', object: 'chat.completion', created: Math.floor(Date.now() / 1000), model: req.model,
-      choices: [{ index: 0, message: { role: 'assistant', content: resp.text }, finish_reason: resp.finishReason || 'stop' }],
+      choices: [{ index: 0, message, finish_reason: resp.toolCalls?.length ? 'tool_calls' : (resp.finishReason || 'stop') }],
     };
+  },
+  // OpenAI Chat Completions GET /v1/models shape (grok's picker).
+  formatModels(choices) {
+    return { object: 'list', data: choices.map((c) => ({ id: c.id, object: 'model', created: 0, owned_by: 'asx-proxy' })) };
   },
 };
 
@@ -68,9 +87,14 @@ function grokToken(cred: string): string {
 export const grokBackend: BackendAdapter = {
   buildRequest(req: CommonRequest, cred: string) {
     const choice = resolveChoice('grok', req.model);
-    const messages = [] as any[];
-    if (req.system) messages.push({ role: 'system', content: req.system });
-    for (const m of req.messages) messages.push({ role: m.role === 'tool' ? 'user' : m.role, content: m.content });
+    const messages = chatMessagesFromCommon(req.system, req.messages);
+    const body: any = { model: choice.model, messages, stream: true };
+    const tools = chatToolsFromCommon(req.tools);
+    if (tools) {
+      body.tools = tools;
+      if (req.toolChoice) body.tool_choice = req.toolChoice;
+      if (req.parallelToolCalls != null) body.parallel_tool_calls = req.parallelToolCalls;
+    }
     return {
       url: GROK_URL,
       headers: {
@@ -82,7 +106,7 @@ export const grokBackend: BackendAdapter = {
         'User-Agent': `grok-shell/${GROK_VERSION} (macos; aarch64)`,
         'x-grok-model-override': choice.model,
       },
-      body: JSON.stringify({ model: choice.model, messages, stream: true }),
+      body: JSON.stringify(body),
     };
   },
 
@@ -97,6 +121,7 @@ export const grokBackend: BackendAdapter = {
       if (!ch) continue;
       const text = ch.delta?.content;            // ignore reasoning_content for now
       if (typeof text === 'string' && text) out.push({ type: 'text', text });
+      if (Array.isArray(ch.delta?.tool_calls)) out.push(...parseChatToolDeltas(ch.delta.tool_calls));
       if (ch.finish_reason) out.push({ type: 'done', finishReason: ch.finish_reason });
     }
     return out;

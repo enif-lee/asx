@@ -114,11 +114,11 @@ function writeActiveCredentials(raw: string): void {
 
 // Returns { status, data }. status 0 = network error. Non-2xx (esp. 401) means the
 // stored token is expired/invalid — the caller must not fall back to stale local data.
-async function fetchOAuthUsage(token: string): Promise<{ status: number; data: any | null }> {
+async function fetchOAuthUsage(token: string): Promise<{ status: number; data: any | null; retryAfter?: string | null }> {
   return fetchAnthropicJson('/api/oauth/usage', token);
 }
 
-async function fetchAnthropicJson(path: string, token: string): Promise<{ status: number; data: any | null }> {
+async function fetchAnthropicJson(path: string, token: string): Promise<{ status: number; data: any | null; retryAfter?: string | null }> {
   const headers = {
     'Authorization': `Bearer ${token}`,
     'anthropic-version': '2023-06-01',
@@ -126,19 +126,20 @@ async function fetchAnthropicJson(path: string, token: string): Promise<{ status
   };
   try {
     const res = await fetch(`https://api.anthropic.com${path}`, { headers });
-    if (!res.ok) return { status: res.status, data: null };
-    return { status: res.status, data: await res.json() };
+    if (!res.ok) return { status: res.status, data: null, retryAfter: res.headers.get('retry-after') };
+    return { status: res.status, data: await res.json(), retryAfter: res.headers.get('retry-after') };
   } catch {
     return fetchAnthropicJsonWithCurl(path, headers);
   }
 }
 
-function fetchAnthropicJsonWithCurl(path: string, headers: Record<string, string>): { status: number; data: any | null } {
+function fetchAnthropicJsonWithCurl(path: string, headers: Record<string, string>): { status: number; data: any | null; retryAfter?: string | null } {
   try {
     const config = [
       'silent',
       'show-error',
       `url = ${JSON.stringify(`https://api.anthropic.com${path}`)}`,
+      'dump-header = -',
       ...Object.entries(headers).map(([k, v]) => `header = ${JSON.stringify(`${k}: ${v}`)}`),
     ].join('\n');
     const out = execFileSync('curl', ['--config', '-', '--write-out', '\nASX_HTTP_STATUS:%{http_code}'], {
@@ -149,9 +150,13 @@ function fetchAnthropicJsonWithCurl(path: string, headers: Record<string, string
     });
     const m = out.match(/\nASX_HTTP_STATUS:(\d{3})\s*$/);
     if (!m) return { status: 0, data: null };
-    const body = out.slice(0, m.index).trim();
+    const raw = out.slice(0, m.index);
+    const split = raw.match(/\r?\n\r?\n/);
+    const headerText = split ? raw.slice(0, split.index) : '';
+    const body = (split ? raw.slice((split.index || 0) + split[0].length) : raw).trim();
+    const retryAfter = headerText.match(/^retry-after:\s*(.+)$/im)?.[1]?.trim() || null;
     const status = Number(m[1]);
-    return { status, data: status >= 200 && status < 300 && body ? JSON.parse(body) : null };
+    return { status, data: status >= 200 && status < 300 && body ? JSON.parse(body) : null, retryAfter };
   } catch {
     return { status: 0, data: null };
   }
@@ -307,9 +312,12 @@ export const claudeCodeAdapter: ProviderAdapter = {
 
       // Live usage is the source of truth. A 401/403 means the token is expired/invalid;
       // do NOT fall back to stale local history (it would report misleading usage).
-      const { status, data: usage } = await fetchOAuthUsage(token);
+      const { status, data: usage, retryAfter } = await fetchOAuthUsage(token);
       if (status === 401 || status === 403) {
         return baseInfo + `\n  ⚠ Unable to fetch usage — token expired or invalid (HTTP ${status}). Re-login: asx login claude`;
+      }
+      if (status === 429) {
+        return baseInfo + `\n  ⚠ Unable to fetch usage — rate limited (HTTP 429)${retryAfter ? `, retry after ${retryAfter}s` : ''}.`;
       }
       if (!usage) {
         const why = status === 0 ? 'network error' : `HTTP ${status}`;

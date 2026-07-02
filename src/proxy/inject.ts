@@ -2,6 +2,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { dlog } from '../utils/log.js';
 import { backendChoices } from './models.js';
+import { getAsxTmpBase } from '../utils/platform.js';
 
 // Inject proxy endpoint into the isolated temp environment so the *native binary*
 // (codex or claude) talks to our local ASX proxy instead of real provider.
@@ -20,7 +21,7 @@ export async function injectProxyEndpoint(
   if (prov === 'codex') {
     await injectCodexProxy(tmpDir, proxyBaseUrl, env, choices.map((c) => c.id));
   } else if (prov.includes('claude')) {
-    await injectClaudeProxy(env, proxyBaseUrl);
+    await injectClaudeProxy(env, proxyBaseUrl, choices.map((c) => c.id));
   } else if (prov === 'grok') {
     await injectGrokProxy(tmpDir, proxyBaseUrl, env, choices.map((c) => c.id));
   }
@@ -35,8 +36,7 @@ async function injectCodexProxy(tmpDir: string | undefined, proxyBaseUrl: string
   if (!codexHome) {
     // Last resort: use a temp dir just for this injection
     const fs = await import('node:fs');
-    const os = await import('node:os');
-    const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'asx-codex-proxy-'));
+    const temp = fs.mkdtempSync(path.join(getAsxTmpBase(), 'asx-codex-proxy-'));
     codexHome = path.join(temp, 'codex');
     env.CODEX_HOME = codexHome;
   }
@@ -75,7 +75,10 @@ requires_openai_auth = true
   }
 }
 
-async function injectClaudeProxy(env: NodeJS.ProcessEnv, proxyBaseUrl: string) {
+// Claude Code's built-in Opus/Sonnet/Haiku/Fable model slots (there are exactly these four).
+const CLAUDE_MODEL_SLOTS = ['OPUS', 'SONNET', 'HAIKU', 'FABLE'];
+
+async function injectClaudeProxy(env: NodeJS.ProcessEnv, proxyBaseUrl: string, models: string[]) {
   // Claude Code respects ANTHROPIC_BASE_URL for all model calls.
   // We point it at our proxy. Auth is handled inside proxy using target cred.
   env.ANTHROPIC_BASE_URL = proxyBaseUrl.replace(/\/$/, '');
@@ -83,6 +86,22 @@ async function injectClaudeProxy(env: NodeJS.ProcessEnv, proxyBaseUrl: string) {
   if (!env.ANTHROPIC_AUTH_TOKEN && !env.ANTHROPIC_API_KEY) {
     env.ANTHROPIC_AUTH_TOKEN = 'asx-proxy-token';
   }
+  // Claude Code hardcodes its Opus/Sonnet/Haiku picker rows and offers no way to hide them; gateway
+  // discovery would only *append* backend models alongside them. So instead we REMAP the built-in
+  // slots onto the backend models (id + display name) and leave gateway discovery OFF. Result: the
+  // /model picker shows Default + the backend models only, with real names — no Claude names.
+  delete env.CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY;
+  models.slice(0, CLAUDE_MODEL_SLOTS.length).forEach((m, i) => {
+    const slot = CLAUDE_MODEL_SLOTS[i];
+    env[`ANTHROPIC_DEFAULT_${slot}_MODEL`] = m;             // raw backend id; the proxy resolves it
+    env[`ANTHROPIC_DEFAULT_${slot}_MODEL_NAME`] = m;        // shown in the picker
+    env[`ANTHROPIC_DEFAULT_${slot}_MODEL_DESCRIPTION`] = 'via asx proxy';
+  });
+  if (models.length > CLAUDE_MODEL_SLOTS.length) {
+    dlog(`[asx-proxy] ${models.length - CLAUDE_MODEL_SLOTS.length} extra backend model(s) not shown (Claude has only ${CLAUDE_MODEL_SLOTS.length} model slots)`);
+  }
+  // Default the session to the first backend model instead of Claude's built-in Opus.
+  if (models[0] && !env.ANTHROPIC_MODEL) env.ANTHROPIC_MODEL = models[0];
   // Also help openai-shim paths if claude is in shim mode
   env.OPENAI_BASE_URL = proxyBaseUrl;
 }
@@ -94,8 +113,7 @@ async function injectGrokProxy(tmpDir: string | undefined, proxyBaseUrl: string,
   }
   if (!grokHome) {
     const fsMod = await import('node:fs');
-    const os = await import('node:os');
-    const temp = fsMod.mkdtempSync(path.join(os.tmpdir(), 'asx-grok-proxy-'));
+    const temp = fsMod.mkdtempSync(path.join(getAsxTmpBase(), 'asx-grok-proxy-'));
     grokHome = path.join(temp, 'grok');
     env.GROK_HOME = grokHome;
   }

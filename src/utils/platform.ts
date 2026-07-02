@@ -82,6 +82,12 @@ export function ensureDirFor(filePath: string): void {
   }
 }
 
+export function getAsxTmpBase(): string {
+  // asx isolation dirs (isolated agent homes holding copied credentials) live under /tmp on
+  // unix-like systems. Windows has no /tmp, so fall back to the OS temp dir there.
+  return getPlatform() === 'win32' ? os.tmpdir() : '/tmp';
+}
+
 export function getAsxConfigDir(): string {
   // Our own config dir for metadata (not secrets)
   const base = getConfigBaseDir();

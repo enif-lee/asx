@@ -60,14 +60,25 @@ describe('forEachUpstreamEvent', () => {
 });
 
 describe('proxy metadata endpoints', () => {
-  it('serves backend model choices on /v1/models', async () => {
-    const proxy = await startProxy({ sourceProvider: 'codex', targetProvider: 'zai', targetCredential: { raw: 'zai-key' } });
+  it('serves backend model choices on /v1/models in the agent wire schema', async () => {
+    // codex agent -> codex ModelInfo schema ({ models: [{ slug, ... }] })
+    const codex = await startProxy({ sourceProvider: 'codex', targetProvider: 'zai', targetCredential: { raw: 'zai-key' } });
     try {
-      const res = await fetch(`${proxy.url}/v1/models`);
-      const body: any = await res.json();
-      expect(body.data.map((m: any) => m.id)).toContain('glm-5.2');
+      const body: any = await (await fetch(`${codex.url}/v1/models`)).json();
+      expect(body.models.map((m: any) => m.slug)).toContain('glm-5.2');
     } finally {
-      proxy.stop();
+      codex.stop();
+    }
+    // claude agent -> Anthropic models list ({ data: [{ id, type:'model', ... }] })
+    const claude = await startProxy({ sourceProvider: 'claude', targetProvider: 'zai', targetCredential: { raw: 'zai-key' } });
+    try {
+      const body: any = await (await fetch(`${claude.url}/v1/models`)).json();
+      // ids are claude-prefixed (to pass Claude Code's picker filter); display_name is the real name
+      expect(body.data.map((m: any) => m.display_name)).toContain('glm-5.2');
+      expect(body.data.every((m: any) => /^(claude|anthropic)/i.test(m.id))).toBe(true);
+      expect(body.data[0].type).toBe('model');
+    } finally {
+      claude.stop();
     }
   });
 });

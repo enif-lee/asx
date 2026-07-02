@@ -4,7 +4,7 @@ import path from 'node:path';
 import { execSync } from 'node:child_process';
 import { setSecret, getSecret } from '../storage/secure-store.js';
 import { addAccount } from '../storage/account-store.js';
-import { getCodexAuthPath, ensureDirFor } from '../utils/platform.js';
+import { getCodexAuthPath, ensureDirFor, getAsxTmpBase } from '../utils/platform.js';
 import { renderBar, formatReset } from '../utils/bar.js';
 import { decodeJwtClaims } from '../utils/jwt.js';
 
@@ -56,7 +56,7 @@ async function attemptCodexNativeRefresh(accountName: string): Promise<boolean> 
     if (!stored) return false;
 
     // Refresh inside a private CODEX_HOME so native Codex never mutates the shared ~/.codex.
-    tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), `asx-codex-refresh-${accountName.replace(/[^a-zA-Z0-9_-]/g, '_')}-`));
+    tmpDir = fs.mkdtempSync(path.join(getAsxTmpBase(), `asx-codex-refresh-${accountName.replace(/[^a-zA-Z0-9_-]/g, '_')}-`));
     const authPath = path.join(tmpDir, 'auth.json');
     writeCodexAuth(stored, authPath);
     const env = { ...process.env, CODEX_HOME: tmpDir };
