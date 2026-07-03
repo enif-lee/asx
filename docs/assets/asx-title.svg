@@ -1,0 +1,21 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="2172" height="724" viewBox="0 0 2172 724" role="img" aria-labelledby="title desc">
+  <title id="title">asx</title>
+  <desc id="desc">multi-account switcher for AI coding agents</desc>
+  <rect width="2172" height="724" fill="#fff"/>
+  <text x="1086" y="295"
+        text-anchor="middle"
+        dominant-baseline="middle"
+        font-family="SFMono-Regular, Menlo, Consolas, Liberation Mono, monospace"
+        font-size="250"
+        font-weight="800"
+        letter-spacing="0"
+        fill="#101820">[asx]</text>
+  <text x="1086" y="462"
+        text-anchor="middle"
+        dominant-baseline="middle"
+        font-family="SFMono-Regular, Menlo, Consolas, Liberation Mono, monospace"
+        font-size="54"
+        font-weight="500"
+        letter-spacing="0"
+        fill="#3a4652">multi-account switcher for AI coding agents</text>
+</svg>

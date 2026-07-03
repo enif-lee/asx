@@ -1,7 +1,7 @@
 # asx
 
 <p align="center">
-  <img src="docs/assets/asx-title.png" alt="asx - multi-account agent switcher" />
+  <img src="docs/assets/asx-title.svg" alt="asx - multi-account switcher for AI coding agents" />
 </p>
 
 **Multi-account switcher for LLM coding tools.**
