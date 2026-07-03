@@ -142,7 +142,7 @@ More providers can be added easily via the adapter pattern.
 - Claude long-lived token profiles only update asx's active marker on `switch`; `exec` injects `CLAUDE_CODE_OAUTH_TOKEN`.
 - `exec` / `e` keeps system profiles on the provider's normal home path. For isolated profiles it injects the provider's home env var (`CLAUDE_CONFIG_DIR` / `CODEX_HOME` / `GROK_HOME`) to point at the isolated profile home.
   - Session history and shared setup (`projects`/`sessions`/`history`, plus provider-supported `skills`/`agents`/`hooks`/`settings`) are **symlinked** from the provider's system home (`~/.claude`, `~/.codex`, `~/.grok`) into isolated agent profiles. Backend-only profiles do not participate.
-  - Cross-provider runs launch the agent binary under a dedicated scratch home (with a dummy stub so it skips its own login) and route real requests through the local ASX Proxy using the profile's backend credential.
+  - Cross-provider runs launch the agent binary under a fresh per-run context home, route real requests through the local ASX Proxy using the profile's backend credential, then delete that context when the agent exits. Cross context options are consumed before agent args: `-s`/`--shared`, `-i`/`--isolated`, `--share <categories>`, `--isolate <categories>`, `--keep-context`. Use `--` to force later args through to the agent.
   - `-b / --bypass` automatically injects the appropriate full-access flags for the provider.
 - `list` (and `list -u`) detects the *live* credential currently loaded in the system (native keychain/auth files) and annotates the matching stored account with `(current in system)`.
 

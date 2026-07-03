@@ -7,11 +7,12 @@ import path from 'node:path';
 import { getAdapter, listKnownProviders } from './providers/index.js';
 import * as provIndex from './providers/index.js';
 import { getClaudeCodeOAuthToken, isClaudeCodeLongLivedToken } from './providers/claude-code.js';
-import { getAsxProfilesDir } from './utils/platform.js';
 import { listAccounts, getActive, getAccountByName, getAccount, setShare, setProfileType, type AccountRecord } from './storage/account-store.js';
 import { getSecret } from './storage/secure-store.js';
-import { getProfileHome, safeProfileDirName } from './storage/profile-home.js';
-import { linkSharedState, parseCategories, parseCategoriesForProvider, describeShare, supportedShareCategories, SHARE_CATEGORIES } from './storage/shared-state.js';
+import { getProfileHome } from './storage/profile-home.js';
+import { linkSharedState, describeShare, resolveShareSelection, SHARE_CATEGORIES, type ShareSelectionOpts } from './storage/shared-state.js';
+import { agentScratchHome, crossSessionAgentHome, removeCrossSessionAgentHome } from './storage/agent-home.js';
+import { parseExecArgs } from './exec-args.js';
 import { dlog } from './utils/log.js';
 
 function getProviderShortName(provider: string): string {
@@ -95,16 +96,6 @@ function canShowSharing(account: AccountRecord): boolean {
   return account.profileType !== 'system' && isAgentProvider(account.provider);
 }
 
-// In cross-provider exec the launched agent binary is NOT the profile's provider,
-// so it must run under its own home holding a dummy stub credential — kept separate
-// from the profile home, which holds the real backend credential (the SSOT).
-function agentScratchHome(agentProvider: string, accountName: string): string {
-  const dir = path.join(getAsxProfilesDir(), '.agents', safeProfileDirName(agentProvider, accountName));
-  ensureHome700(path.dirname(dir));
-  ensureHome700(dir);
-  return dir;
-}
-
 async function runCommand(cmd: string, args: string[], opts: SpawnOptions = {}): Promise<number> {
   return new Promise<number>((resolve, reject) => {
     const child = spawnNative(cmd, args, { stdio: 'inherit', ...opts });
@@ -156,21 +147,12 @@ function withShareFlags(cmd: Command): Command {
     .option('--isolate <categories>', 'Share everything except these comma-separated categories');
 }
 
-interface ShareOpts { isolated?: boolean; shared?: boolean; share?: string; isolate?: string }
+type ShareOpts = ShareSelectionOpts;
 // Resolve share flags into the value to persist. Returns { provided:false } when no
 // flag was passed (leave the profile's setting untouched). `value` follows the store
 // convention: undefined => share all, [] => isolated, [...] => that subset.
 function resolveShareFlags(o: ShareOpts, provider?: string): { provided: boolean; value?: string[] } {
-  const set = [o.isolated, o.shared, o.share, o.isolate].filter((x) => x !== undefined);
-  if (set.length === 0) return { provided: false };
-  if (set.length > 1) throw new Error('Use only one of --isolated / --shared / --share / --isolate.');
-  if (o.isolated) return { provided: true, value: [] };
-  if (o.shared) return { provided: true, value: undefined };
-  const parse = provider ? (s: string) => parseCategoriesForProvider(s, provider) : parseCategories;
-  if (o.share !== undefined) return { provided: true, value: parse(o.share) };
-  const exclude = parse(o.isolate!);
-  const base = provider ? supportedShareCategories(provider) : SHARE_CATEGORIES;
-  return { provided: true, value: base.filter((c) => !exclude.includes(c)) };
+  return resolveShareSelection(o, provider);
 }
 
 const program = new Command();
@@ -760,7 +742,7 @@ function getBypassFlags(provider: string): string[] {
 program
   .command('exec <name>')
   .alias('e')
-  .description('Run the native CLI (claude/codex/grok/...) under an isolated profile.\nOptional <target> after name routes via ASX Proxy when providers differ (e.g. asx e ed.codex claude).\nUse -b/--bypass to auto-inject full permission flags per provider.\nExamples:\n  asx e ed.codex\n  asx e ed.codex claude "hello"\n  asx e ed.codex -b "do something dangerous"')
+  .description('Run the native CLI (claude/codex/grok/...) under a profile.\nOptional <target> after name routes via ASX Proxy when providers differ (e.g. asx e ed.codex claude).\nCross-provider context flags: -s/--shared, -i/--isolated, --share <categories>, --isolate <categories>, --keep-context. Use -- before raw agent flags.\nUse -b/--bypass to auto-inject full permission flags per provider.\nExamples:\n  asx e ed.codex\n  asx e personal.zai codex --share sessions,skills "hello"\n  asx e personal.zai codex -- -s raw-agent-flag\n  asx e ed.codex -b "do something dangerous"')
   .option('-b, --bypass', 'Automatically inject full-access permission bypass flags for the target provider')
   .option('-d, --debug', 'Show ASX proxy/exec debug logs (to stderr). Off by default.')
   .allowUnknownOption(true)
@@ -806,24 +788,35 @@ program
 
     let env = { ...process.env };
     let proxyHandle: { url?: string; stop: () => void } | null = null;
+    let crossContextHome: string | null = null;
+    let keepContext = false;
     let profileSecret: string | null | undefined;
     const readProfileSecret = async () => {
       if (profileSecret === undefined) profileSecret = await getSecret(profileProvider, accountName);
       return profileSecret;
     };
 
-    // The profile home IS the store: the native binary reads/writes its auth file
-    // directly there, so a refreshed token is persisted in place — no copy-out,
-    // no sync-back, no temp dir to clean up. Only the proxy needs stopping.
+    // Same-provider exec uses the profile home as the store. Cross-provider exec
+    // creates a short-lived context home and a proxy; cleanup handles both.
+    let cleaned = false;
     const cleanup = () => {
+      if (cleaned) return;
+      cleaned = true;
       if (proxyHandle) {
         try { proxyHandle.stop(); } catch {}
+      }
+      if (crossContextHome && !keepContext) {
+        try { removeCrossSessionAgentHome(crossContextHome); }
+        catch (e: any) { dlog('[asx exec] failed to remove cross context:', e?.message || e); }
       }
     };
 
     try {
+      const execArgs = parseExecArgs(rawAfter, { isCross, agentProvider });
+      keepContext = execArgs.keepContext || process.env.ASX_KEEP_CONTEXT === '1';
+
       // Auto-refresh the profile credential if expired, before any cred is read/seeded.
-      const wantDebug = process.argv.includes('-d') || process.argv.includes('--debug');
+      const wantDebug = options?.debug || execArgs.debug;
       const fresh = await ensureFresh(profileProvider, accountName, wantDebug);
       if (!fresh) {
         console.error(chalk.red(`[asx] ${profileProvider}/${accountName} credential is expired and could not be refreshed. Re-login: asx login ${profileProvider}`));
@@ -872,38 +865,35 @@ program
         }
         }
       } else {
-        // Cross: the agent binary runs under a dedicated scratch home with a dummy
+        // Cross: the agent binary runs under a fresh context home with a dummy
         // stub so it skips its own login; the real backend auth is the proxy's.
-        const home = agentScratchHome(agentProvider, accountName);
+        const home = crossSessionAgentHome(agentProvider, accountName);
+        crossContextHome = home;
         env[spec.homeEnv] = home;
         seedAgentHome(agentProvider, home);
         // Share the agent's own session history/settings (but not config.toml —
-        // the proxy injection rewrites that below), honoring the profile's choice.
-        linkSharedState(agentProvider, home, { isCross: true, categories: acct.share });
+        // the proxy injection rewrites that below), honoring this run's choice.
+        linkSharedState(agentProvider, home, { isCross: true, categories: execArgs.share.provided ? execArgs.share.value : undefined });
         if (spec.stub) {
           // grok has stub=null — its injected config.toml handles auth instead.
           try { fs.writeFileSync(path.join(home, spec.file), spec.stub(), { mode: 0o600 }); } catch {}
         }
+        if (keepContext) console.error(chalk.gray(`[asx] keeping cross context: ${home}`));
       }
 
       // forwardArgs already prepared above (target consumed if present)
-      let forwardArgs = rawAfter;
+      let forwardArgs = execArgs.forwardArgs;
 
       // Handle --debug / -d (ASX-level): enable proxy/exec logs, strip from forwarded args.
-      const debug = options?.debug || forwardArgs.includes('-d') || forwardArgs.includes('--debug');
+      const debug = options?.debug || execArgs.debug;
       if (debug) {
         process.env.ASX_DEBUG = '1';
-        forwardArgs = forwardArgs.filter(a => a !== '-d' && a !== '--debug');
       }
 
       // Handle --bypass / -b from either options or raw args
-      const bypassFromOpts = options?.bypass;
-      const bypassFromArgs = forwardArgs.includes('-b') || forwardArgs.includes('--bypass');
-      const bypass = bypassFromOpts || bypassFromArgs;
+      const bypass = options?.bypass || execArgs.bypass;
 
       if (bypass) {
-        // Remove the bypass flags from forwarded args
-        forwardArgs = forwardArgs.filter(a => a !== '-b' && a !== '--bypass');
         const bypassFlags = getBypassFlags(agentProvider);
         forwardArgs = [...bypassFlags, ...forwardArgs];
       }
@@ -940,13 +930,26 @@ program
 
       dlog(chalk.blue(`[asx exec] agent=${agentProvider} profile=${profileProvider}/${accountName} isolated=${!!env[spec.homeEnv]}${bypass ? ' +bypass' : ''}${isCross ? ' +proxy' : ''}`));
       const child = spawnNative(nativeBin, forwardArgs, { env, stdio: 'inherit' });
+      const handleSignal = (signal: NodeJS.Signals) => {
+        cleanup();
+        try { child.kill(signal); } catch {}
+        process.exit(signal === 'SIGINT' ? 130 : 143);
+      };
+      process.once('SIGINT', handleSignal);
+      process.once('SIGTERM', handleSignal);
+      const removeSignalHandlers = () => {
+        process.off('SIGINT', handleSignal);
+        process.off('SIGTERM', handleSignal);
+      };
 
       child.on('exit', (code) => {
+        removeSignalHandlers();
         cleanup();
         process.exit(code ?? 0);
       });
 
       child.on('error', (err) => {
+        removeSignalHandlers();
         cleanup();
         console.error(chalk.red(err.message || err));
         process.exit(1);

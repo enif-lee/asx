@@ -96,6 +96,21 @@ export function parseCategoriesForProvider(csv: string, provider: string): Share
   return cats;
 }
 
+export interface ShareSelectionOpts { isolated?: boolean; shared?: boolean; share?: string; isolate?: string }
+
+export function resolveShareSelection(o: ShareSelectionOpts, provider?: string): { provided: boolean; value?: string[] } {
+  const set = [o.isolated, o.shared, o.share, o.isolate].filter((x) => x !== undefined);
+  if (set.length === 0) return { provided: false };
+  if (set.length > 1) throw new Error('Use only one of --isolated / --shared / --share / --isolate.');
+  if (o.isolated) return { provided: true, value: [] };
+  if (o.shared) return { provided: true, value: undefined };
+  const parse = provider ? (s: string) => parseCategoriesForProvider(s, provider) : parseCategories;
+  if (o.share !== undefined) return { provided: true, value: parse(o.share) };
+  const exclude = parse(o.isolate!);
+  const base = provider ? supportedShareCategories(provider) : SHARE_CATEGORIES;
+  return { provided: true, value: base.filter((c) => !exclude.includes(c)) };
+}
+
 // Symlink shared session/history/settings state from the provider's system home
 // into an isolated profile (or cross-provider agent) home. `categories` limits which
 // categories are shared: undefined => all, [] => none (fully isolated). Best-effort:

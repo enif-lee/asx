@@ -284,14 +284,14 @@ Supported categories are provider-specific. Claude supports `sessions`, `skills`
 
 ### Cross-Provider Execution
 
-When profile provider and agent provider differ, ASX starts a local proxy and launches the agent under a dedicated scratch home. The scratch home can share the target agent's history/settings categories, but the real backend credential stays in the profile home and is only read by ASX Proxy.
+When profile provider and agent provider differ, ASX starts a local proxy and launches the agent under a fresh per-run context home. The context can share the target agent's history/settings categories, but the real backend credential stays in the profile home and is only read by ASX Proxy. The context is removed on normal exit, error, SIGINT, or SIGTERM unless `--keep-context` or `ASX_KEEP_CONTEXT=1` is set.
 
 ```mermaid
 flowchart TD
   Cmd["asx e personal.zai codex"]
   ProfileHome["ASX profile home<br/>zai-personal.zai/credential"]
   BackendCred["ASX Proxy backend credential"]
-  Scratch["agent scratch home<br/>profiles/.agents/codex-personal.zai"]
+  Scratch["agent context home<br/>profiles/.agents/sessions/codex-personal.zai-run-id"]
   Config["scratch CODEX_HOME/config.toml<br/>base_url = http://127.0.0.1:port/v1<br/>model_provider = asx-proxy<br/>model = glm-5.2"]
   Agent["codex CLI"]
   Proxy["ASX Proxy"]
@@ -302,6 +302,8 @@ flowchart TD
   Agent -- "Codex Responses wire" --> Proxy
   Proxy -- "ZAI OpenAI-compatible chat completions wire" --> Upstream
 ```
+
+Cross-provider exec consumes ASX options before forwarding agent args. `-s`/`--shared` shares all provider-supported categories; `-i`/`--isolated` shares none; `--share <categories>` and `--isolate <categories>` narrow the per-run context. Args after `--` are always forwarded to the agent.
 
 In this mode:
 
