@@ -98,18 +98,37 @@ ASX keeps secrets and metadata separate.
 - `src/storage/account-store.ts` stores account metadata, labels, email, profile type, and active markers.
 - `src/storage/shared-state.ts` symlinks selected history/settings state from the provider's system home into an isolated profile or scratch home.
 
+The full on-disk profile structure:
+
 ```mermaid
 flowchart TD
-  Config["ASX config dir"]
+  Config["ASX config dir<br/>macOS: ~/Library/Application Support/asx"]
   Accounts["accounts.json<br/>provider, name, label, email, profileType, share, addedAt"]
   Active[".active.json<br/>provider -> active profile name"]
   Profiles["profiles/"]
-  ProfileHome["<provider>-<name>/<br/>0700 profile home"]
-  Credential["native auth file<br/>0600 credential"]
+
+  subgraph IsolatedHome["isolated profile home: profiles/&lt;provider&gt;-&lt;name&gt;/ (0700)"]
+    Credential["native auth file<br/>0600 credential (auth.json / .credentials.json)"]
+    SharedLinks["shared categories per profile `share`<br/>sessions, skills, settings, ...<br/>symlinks into the provider system home"]
+  end
+
+  SystemHome["provider system home<br/>~/.claude ~/.codex ~/.grok<br/>(system profiles run here directly)"]
+  Keychain["Claude macOS exception<br/>Keychain: Claude Code-credentials-&lt;sha256(home)[:8]&gt;"]
+
+  subgraph AgentsDir["profiles/.agents/ (non-profile agent homes)"]
+    Scratch["&lt;provider&gt;-&lt;name&gt;/<br/>standalone `asx proxy` scratch home"]
+    RunHome["sessions/&lt;provider&gt;-&lt;name&gt;-&lt;runId&gt;/<br/>per-run cross-provider context home<br/>removed on exit unless --keep-context"]
+  end
 
   Config --> Accounts
   Config --> Active
-  Config --> Profiles --> ProfileHome --> Credential
+  Config --> Profiles
+  Profiles --> IsolatedHome
+  Profiles --> AgentsDir
+  Accounts -- "profileType: system" --> SystemHome
+  Accounts -- "profileType: isolated" --> IsolatedHome
+  Credential -. "claude on macOS lives in" .-> Keychain
+  SharedLinks -. "symlink" .-> SystemHome
 ```
 
 Credential files are named like the native CLI expects:
@@ -274,13 +293,45 @@ flowchart TD
 
 No ASX Proxy is needed because the launched agent already speaks the backend provider's native wire format.
 
-Shared-state symlinks are category-controlled for isolated agent profiles:
+### Profile Sharing / Isolation
+
+Shared-state symlinks are category-controlled for isolated agent profiles. The profile's
+`share` metadata (set at `asx login`, changed with `asx sharing`) selects categories:
 
 - unset `share`: share all categories.
 - `share: []`: share nothing.
 - `share: ["sessions", ...]`: share only those categories.
 
 Supported categories are provider-specific. Claude supports `sessions`, `skills`, `agents`, `hooks`, and `settings`; Codex and Grok support `sessions`, `skills`, and `settings`.
+
+`src/storage/shared-state.ts` owns the category → home-entry mapping:
+
+```text
+sessions  claude: projects/ sessions/ shell-snapshots/ file-history/ plans/ tasks/ todos/ history.jsonl
+          codex:  sessions/ archived_sessions/ history.jsonl session_index.jsonl
+          grok:   sessions/ projects/ active_sessions.json
+skills    all:    skills/
+agents    claude: agents/
+hooks     claude: hooks/
+settings  claude: plugins/ settings.json CLAUDE.md
+          codex:  rules/ plugins/ AGENTS.md config.toml
+          grok:   completions/ config.toml
+```
+
+Linking rules (`linkSharedState`):
+
+- Auth files and volatile runtime state (caches, logs, sqlite, tmp) are never in the map —
+  identity and scratch state stay per-profile unconditionally.
+- Shared directories are created in the system home if missing, so new history written
+  through the link lands in the shared home; missing shared *files* are simply skipped.
+- An existing real file/dir in the profile home is never clobbered by a symlink; only
+  stale symlinks are replaced.
+- On cross-provider runs `config.toml` is excluded even when `settings` is shared — the
+  proxy injection writes its own and must not overwrite the user's real config.
+- Everything is best-effort: a missing or odd system home never blocks execution.
+
+Cross-provider runs take the same selection per run via `-s`/`-i`/`--share`/`--isolate`
+(default: the agent provider's full category set), applied to the throwaway context home.
 
 ### Cross-Provider Execution
 
@@ -345,6 +396,24 @@ Files:
 
 `GET /models` and `GET /v1/models` return the backend model choices. This lets Codex and Grok display backend-specific model choices during cross-provider runs.
 
+### Agent Injection Details
+
+Each agent needs a different mechanism to (a) point at the proxy and (b) show backend
+models in its own picker:
+
+- **Codex**: a scratch `CODEX_HOME/config.toml` forces `model_provider = "asx-proxy"`
+  (`wire_api = "responses"`), plus a `models.json` catalog referenced by
+  `model_catalog_json`. Codex 0.142.x requires the full `ModelInfo` shape
+  (`slug`/`display_name`/`truncation_policy`/...) or its `/model` picker degrades.
+- **Claude**: `ANTHROPIC_BASE_URL` points at the proxy. Claude Code hardcodes its four
+  model slots (Opus/Sonnet/Haiku/Fable) and gateway discovery can only *append* to them,
+  so instead the backend models are remapped onto the built-in slots via
+  `ANTHROPIC_DEFAULT_<SLOT>_MODEL{,_NAME,_DESCRIPTION}` — the picker then shows only
+  backend models with real names. At most four backend models are shown.
+- **Grok**: a scratch `GROK_HOME/config.toml` with one `[model."<id>"]` entry per backend
+  model (grok appends `/chat/completions` to `base_url`), a dummy `api_key` so headless
+  `grok -p` skips login, and `permission_mode = "always-approve"`.
+
 ### Proxy Adapter Composition
 
 ```mermaid
@@ -374,6 +443,55 @@ flowchart LR
 ```
 
 `zai` is backend-only because ASX does not launch a native ZAI agent.
+
+### Codex Namespace Tools (Multi-Agent)
+
+Codex ships its multi-agent tools as a *namespace group* on the Responses wire, and dispatches
+replies on a `{name, namespace}` pair — not a flat name:
+
+```jsonc
+// request tool def (codex -> proxy)
+{ "type": "namespace", "name": "multi_agent_v1",
+  "tools": [ { "type": "function", "name": "spawn_agent", ... }, ... ] }
+
+// expected reply item (proxy -> codex)
+{ "type": "function_call", "name": "spawn_agent", "namespace": "multi_agent_v1", ... }
+```
+
+A flat `function_call` named `multi_agent_v1` fails codex's tool registry lookup with
+`unsupported call: multi_agent_v1`. Other backends only understand flat function tools
+(and Anthropic tool names forbid `.`), so the codex agent adapter:
+
+- flattens each namespace member to `${namespace}__${name}` in the COMMON tool defs and
+  records the namespace list on `CommonRequest.toolNamespaces` (threaded to `StreamCtx`);
+- re-flattens replayed namespaced `function_call` history items the same way, so a
+  multi-turn session matches the defs the backend saw;
+- splits flat names back into `{name, namespace}` on response items — but only under a
+  namespace the request actually declared, because MCP tool names legitimately contain `__`.
+
+### Backend Adapter Constraints
+
+- `claude`: extended thinking is force-disabled for cross-provider agents — they cannot
+  store Anthropic thinking blocks + signatures, and replaying a tool-use turn without them
+  is a hard 400. `temperature`/`top_p`/`top_k` are never sent (newer models reject them).
+  Auth is the OAuth Bearer token with the `claude-code` beta headers.
+- `codex`: speaks the ChatGPT `backend-api/codex/responses` contract (stream-only; the
+  server accumulates when the agent asked for non-stream).
+- `zai`: a 200 response whose body carries an overload code (e.g. `1305`) is treated as
+  retryable via `isRetryable`.
+
+### Proxy Robustness
+
+- Upstream calls retry transient failures (network errors, 408/429/5xx, provider
+  `isRetryable` body signals) with exponential backoff + jitter; auth/bad-request class
+  statuses (400/401/403/404/...) never retry.
+- Streaming tool-call fragments (`tool_call_delta`) are accumulated per index and emitted
+  as complete `tool_call` events at stream end, so agent adapters only frame whole calls.
+- Mid-stream upstream failures never surface as a 500: partial SSE may already be written,
+  so the proxy flushes accumulated tool calls, appends the error as SSE text, and closes
+  with a clean `done` event. Client disconnects cancel the upstream read.
+- OK upstream streams without an `event-stream` content type are passed through untouched
+  (only providers with body-level retry signals get a 200-body inspection).
 
 ## Adding a Provider
 

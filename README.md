@@ -13,7 +13,8 @@ Store each profile's credential in its own `0600` home directory and switch betw
 - **Multiple accounts, one workflow**: Keep work, personal, and team accounts for Claude Code, Codex, Grok, Z.AI, and other providers.
 - **Fast account switching**: Make a saved profile active with `asx switch` and keep `asx list` honest about what is currently loaded.
 - **One-off profile runs**: Run an agent with a selected profile without changing other terminals or your default login.
-- **Cross-provider execution**: Use one agent UI with another provider backend, such as running Codex while routing requests to Claude, Grok, or Z.AI.
+- **Cross-provider execution**: Use one agent UI with another provider backend, such as running Codex while routing requests to Claude, Grok, or Z.AI. Tool calling, session continuity, and Codex multi-agent subagents (`spawn_agent`/collab) work across providers.
+- **Per-profile sharing control**: Choose per profile which state (sessions, skills, agents, hooks, settings) is shared with the provider's system home and which stays isolated.
 - **Usage at a glance**: Show live quota, credits, and rate-limit information with `asx list -u`.
 - **Safer login management**: Save existing sessions before new logins, load current sessions into profiles, and keep each profile's credential in its own `0600` file.
 - **Cross-platform installer**: Install from GitHub Releases on macOS, Linux, and Windows.
@@ -76,10 +77,15 @@ asx e ed.codex "refactor this function"
 asx e ed.codex -b "do dangerous things"
 
 # Cross-provider via ASX Proxy (profile provider != target agent)
-# e.g. run Codex CLI but route through Claude, Grok, or ZAI backend
-asx e ed.codex claude "refactor using claude"
-asx e ed.claude xai "explain with grok"
-asx e personal.zai codex "use ZAI through Codex UI"
+# Pattern: asx e <profile = backend credential> <target = agent UI to launch>
+asx e ed.claude codex "run Codex UI on the Claude backend"
+asx e ed.codex claude "run Claude Code on the Codex backend"
+asx e ed.claude xai "run Grok UI on the Claude backend (xai = grok alias)"
+asx e personal.zai codex "run Codex UI on the ZAI backend"
+
+# Control what the cross-provider run shares with the agent's system home
+asx e personal.zai codex -i "fully isolated run"
+asx e personal.zai codex --share sessions,skills "share only these"
 ```
 
 ## 📋 Commands
@@ -88,17 +94,19 @@ asx e personal.zai codex "use ZAI through Codex UI"
 |--------------------------|-------------|
 | `asx list [provider] [-u/-d]` | List accounts and each profile's shared/isolated categories. `-u/--usage` shows live quota bars. `-d/--debug` dumps stored credentials. Marks the live system credential with `(current in system)`. |
 | `asx load [provider] [name]` | Register the currently active credential as a **system profile**. Auto-generates name like `ed.claude` / `ed.codex` if omitted. |
-| `asx login <provider> [name] [--long-lived] [share flags]` | Login and store a new isolated profile. If the target profile is current in system, login keeps the provider's normal home path. |
-| `asx sharing <name> [share flags]` | Show or change what an isolated agent profile shares from its provider's system home. With no flags, prints the current setting. |
+| `asx login [provider] [name] [--long-lived] [share flags]` | Login and store a new isolated profile. Provider is optional when the profile name identifies it (`asx login jn.claude`). If the target profile is current in system, login keeps the provider's normal home path. |
+| `asx sharing <name> [share flags]` | Show or change what an isolated agent profile shares from its provider's system home. With no flags, prints the current setting. Only isolated agent profiles (claude/codex/grok) accept it — system and backend-only profiles are rejected. |
 | `asx rename <from> <to>` | Rename an account (moves the profile home + updates metadata + active markers). |
-| `asx switch <provider> <name>` (alias: `s`) | Switch the active credential for a provider. |
+| `asx switch <name>` / `asx switch <provider> <name>` (alias: `s`) | Switch the active credential. Provider is optional when the profile name identifies it (`asx switch ed.codex`). |
 | `asx status [provider]` | Show asx-tracked active account(s). |
-| `asx exec <name> [target?] [args...]` (alias: `e`) | Run the native CLI under a profile. When `target` differs from profile provider, requests are routed via local ASX Proxy (input→common→external schema transformers). `-b/--bypass` auto-injects full access flags. |
+| `asx exec <name> [target?] [args...]` (alias: `e`) | Run the native CLI under a profile. When `target` differs from profile provider, requests are routed via local ASX Proxy (input→common→external schema transformers). `-b/--bypass` auto-injects full access flags; `-d/--debug` shows proxy/exec logs. |
+| `asx refresh <name>` / `asx refresh <provider> <name>` [`--no-login`] | Refresh (rotate) a stored credential using its refresh token. If the refresh token is revoked/expired, falls back to the interactive re-login flow (`--no-login` disables the fallback). `exec` also auto-refreshes expired credentials before launch. |
+| `asx proxy <name> <frontend>` | Start a standalone ASX Proxy for the profile's backend and print the env/config needed to point a `<frontend>`-wire agent (`claude`, `codex`, or `grok`) at it manually. Runs until Ctrl+C. |
 | `asx remove [provider] <name>` (alias: `rm`) | Remove a stored account. |
 
 ### Sharing flags (per profile)
 
-Control what an isolated agent profile shares from the provider's system home (`~/.claude`, `~/.codex`, `~/.grok`). System profiles and backend-only profiles such as ZAI do not accept sharing flags. Default is **share everything supported by that provider**; only the credential is per-profile. Claude supports `sessions`, `skills`, `agents`, `hooks`, `settings`; Codex and Grok support `sessions`, `skills`, `settings`. Accepted by `asx login` and `asx sharing`:
+Control what an isolated agent profile shares from the provider's system home (`~/.claude`, `~/.codex`, `~/.grok`). System profiles and backend-only profiles such as ZAI do not accept sharing flags. Default is **share everything supported by that provider**; only the credential is per-profile. Claude supports `sessions`, `skills`, `agents`, `hooks`, `settings`; Codex and Grok support `sessions`, `skills`, `settings`. Accepted by `asx login`, `asx load`, and `asx sharing`:
 
 | Flag | Effect |
 |------|--------|
@@ -107,13 +115,25 @@ Control what an isolated agent profile shares from the provider's system home (`
 | `--share <a,b,...>` | Share only these categories; isolate the rest. |
 | `--isolate <a,b,...>` | Share everything except these categories. |
 
+What each category covers (symlinked from the system home; auth files and volatile caches are never shared):
+
+| Category | Claude (`~/.claude`) | Codex (`~/.codex`) | Grok (`~/.grok`) |
+|----------|----------------------|--------------------|------------------|
+| `sessions` | `projects/`, `sessions/`, `shell-snapshots/`, `file-history/`, `plans/`, `tasks/`, `todos/`, `history.jsonl` | `sessions/`, `archived_sessions/`, `history.jsonl`, `session_index.jsonl` | `sessions/`, `projects/`, `active_sessions.json` |
+| `skills` | `skills/` | `skills/` | `skills/` |
+| `agents` | `agents/` | — | — |
+| `hooks` | `hooks/` | — | — |
+| `settings` | `plugins/`, `settings.json`, `CLAUDE.md` | `rules/`, `plugins/`, `AGENTS.md`, `config.toml` | `completions/`, `config.toml` |
+
+The same flags work per-run on cross-provider `exec` (plus `--keep-context` to keep the per-run home for inspection). On cross-provider runs `config.toml` is never symlinked — the proxy injects its own — and existing real files in a profile home are never clobbered by a symlink.
+
 ## 🛠 Supported Providers
 
 | Provider     | Identifier     | Auth                                           | Usage                     |
 |--------------|----------------|------------------------------------------------|---------------------------|
 | Claude Code  | `claude`       | Native access/refresh tokens in profile `CLAUDE_CONFIG_DIR`; optional long-lived `CLAUDE_CODE_OAUTH_TOKEN` | 5h / 7d bars (accurate)   |
 | Codex        | `codex`        | `~/.codex/auth.json` (respects `$CODEX_HOME`)     | 5h / 7d windows           |
-| Grok / xAI   | `grok`         | Native `grok login`; `~/.grok/auth.json` (respects `$GROK_HOME`) | Credits + rate limits     |
+| Grok / xAI   | `grok` (alias: `xai`) | Native `grok login`; `~/.grok/auth.json` (respects `$GROK_HOME`) | Credits + rate limits     |
 | Z.AI         | `zai`          | API key via `asx login zai`; `ZAI_API_KEY`/`ZAI_KEY` for `asx load` | 5h quota via monitor API  |
 | Cursor       | `cursor`       | Metadata only (limited)                           | Metadata only             |
 
