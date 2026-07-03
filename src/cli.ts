@@ -133,7 +133,7 @@ const program = new Command();
 program
   .name('asx')
   .description('Multi-account LLM provider switcher (claude, codex, zai, grok, cursor). Credentials via OS keychain. (renamed from "as" to avoid conflict with LLVM as)')
-  .version('0.1.0');
+  .version('0.3.0');
 
 program
   .command('list [provider]')
