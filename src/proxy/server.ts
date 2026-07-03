@@ -65,7 +65,7 @@ export async function startProxy(options: ProxyStartOptions): Promise<ProxyHandl
       const { res: upstreamRes, errText } = await fetchUpstreamWithRetry(up, backend);
       dlog(`[asx-proxy] upstream ${up.url} -> ${upstreamRes.status}`);
 
-      const ctx: StreamCtx = { id: 'chatcmpl-asx-' + reqId, created: Math.floor(Date.now() / 1000), model: common.model, first: true };
+      const ctx: StreamCtx = { id: 'chatcmpl-asx-' + reqId, created: Math.floor(Date.now() / 1000), model: common.model, first: true, toolNamespaces: common.toolNamespaces };
 
       // errText is set only when the body was already read (an error / non-stream response) —
       // surface it to the agent's output (not a 500), and return. On the happy stream path

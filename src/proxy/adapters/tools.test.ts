@@ -134,6 +134,63 @@ describe('codex agent tools', () => {
     expect(added[0].output_index).toBe(0);         // text message
     expect(added[1].output_index).toBe(1);         // function call
   });
+
+  // Codex ships multi-agent tools as a namespace group and dispatches replies on
+  // {name, namespace} — a flat function_call named 'multi_agent_v1' is "unsupported call".
+  const NS_TOOLS = [{
+    type: 'namespace', name: 'multi_agent_v1', description: 'Tools for spawning and managing sub-agents.',
+    tools: [
+      { type: 'function', name: 'spawn_agent', description: 's', parameters: { type: 'object', properties: {} } },
+      { type: 'function', name: 'wait_agent', description: 'w', parameters: { type: 'object', properties: {} } },
+    ],
+  }];
+  it('flattens namespace tool groups into per-member defs and records the namespace', () => {
+    const r = codexAgent.parseRequest('/responses', {
+      input: [{ type: 'message', role: 'user', content: [{ type: 'input_text', text: 'hi' }] }],
+      tools: NS_TOOLS,
+    });
+    expect(r.tools?.map((t) => t.name)).toEqual(['multi_agent_v1__spawn_agent', 'multi_agent_v1__wait_agent']);
+    expect(r.toolNamespaces).toEqual(['multi_agent_v1']);
+  });
+  it('splits flattened names back into {name, namespace} on function_call items', () => {
+    const c = ctx();
+    c.toolNamespaces = ['multi_agent_v1'];
+    const call: CommonEvent = { type: 'tool_call', id: 'call_1', name: 'multi_agent_v1__spawn_agent', arguments: '{"message":"go"}' };
+    const out = [call, { type: 'done' } as CommonEvent].map((e) => codexAgent.formatStreamChunk(e, c)).join('');
+    const objs = sseObjects(out);
+    const done = objs.find((o) => o.type === 'response.output_item.done' && o.item?.type === 'function_call');
+    expect(done.item).toMatchObject({ name: 'spawn_agent', namespace: 'multi_agent_v1', call_id: 'call_1' });
+    const added = objs.find((o) => o.type === 'response.output_item.added' && o.item?.type === 'function_call');
+    expect(added.item).toMatchObject({ name: 'spawn_agent', namespace: 'multi_agent_v1' });
+  });
+  it('leaves MCP-style __ names alone when no namespace matches', () => {
+    const c = ctx();
+    c.toolNamespaces = ['multi_agent_v1'];
+    const call: CommonEvent = { type: 'tool_call', id: 'c1', name: 'mcp__server__tool', arguments: '{}' };
+    const out = [call, { type: 'done' } as CommonEvent].map((e) => codexAgent.formatStreamChunk(e, c)).join('');
+    const done = sseObjects(out).find((o) => o.type === 'response.output_item.done' && o.item?.type === 'function_call');
+    expect(done.item.name).toBe('mcp__server__tool');
+    expect(done.item.namespace).toBeUndefined();
+  });
+  it('re-flattens replayed namespaced function_call history to match the flattened defs', () => {
+    const r = codexAgent.parseRequest('/responses', {
+      input: [
+        { type: 'message', role: 'user', content: [{ type: 'input_text', text: 'go' }] },
+        { type: 'function_call', call_id: 'call_1', name: 'spawn_agent', namespace: 'multi_agent_v1', arguments: '{}' },
+        { type: 'function_call_output', call_id: 'call_1', output: 'spawned' },
+      ],
+      tools: NS_TOOLS,
+    });
+    expect(r.messages[1].toolCalls).toEqual([{ id: 'call_1', name: 'multi_agent_v1__spawn_agent', arguments: '{}' }]);
+  });
+  it('splits namespaced calls in non-stream formatResponse too', () => {
+    const r = codexAgent.parseRequest('/responses', { input: [], tools: NS_TOOLS });
+    const out: any = codexAgent.formatResponse(
+      { text: '', toolCalls: [{ id: 'c1', name: 'multi_agent_v1__wait_agent', arguments: '{}' }] }, r,
+    );
+    const fc = out.output.find((i: any) => i.type === 'function_call');
+    expect(fc).toMatchObject({ name: 'wait_agent', namespace: 'multi_agent_v1', call_id: 'c1' });
+  });
 });
 
 describe('codex backend tools', () => {

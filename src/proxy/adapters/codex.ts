@@ -146,7 +146,9 @@ function responsesInputToMessages(input: any): CommonMessage[] {
         content: '',
         toolCalls: [{
           id: it.call_id || it.id || '',
-          name: it.name || '',
+          // Replayed namespaced calls carry {name, namespace} — re-flatten so history
+          // matches the flattened tool defs the backend saw.
+          name: (it.namespace ? `${it.namespace}__` : '') + (it.name || ''),
           arguments: typeof it.arguments === 'string' ? it.arguments : JSON.stringify(it.arguments ?? {}),
         }],
       });
@@ -169,17 +171,41 @@ function responsesInputToMessages(input: any): CommonMessage[] {
   return out;
 }
 
-// Responses tool defs (flat `{type:'function', name, ...}` or nested `{function:{...}}`) -> COMMON.
-function parseTools(tools: any): CommonToolDef[] | undefined {
-  if (!Array.isArray(tools) || !tools.length) return undefined;
-  const out: CommonToolDef[] = [];
+// Responses tool defs (flat `{type:'function', name, ...}`, nested `{function:{...}}`, or codex
+// namespace groups `{type:'namespace', name, tools:[{type:'function',...}]}`) -> COMMON.
+// Codex ships multi-agent tools as a namespace group (e.g. multi_agent_v1 containing spawn_agent)
+// and expects calls back as {name:'spawn_agent', namespace:'multi_agent_v1'} — so we flatten
+// members to `${ns}__${name}` for backends (Anthropic tool names forbid '.') and record the
+// namespaces so the response side can split the flat name back apart.
+function parseTools(tools: any): { defs?: CommonToolDef[]; namespaces?: string[] } {
+  if (!Array.isArray(tools) || !tools.length) return {};
+  const defs: CommonToolDef[] = [];
+  const namespaces: string[] = [];
   for (const t of tools) {
     if (!t) continue;
+    if (t.type === 'namespace' && t.name && Array.isArray(t.tools)) {
+      namespaces.push(t.name);
+      for (const nt of t.tools) {
+        if (!nt?.name) continue;
+        defs.push({ name: `${t.name}__${nt.name}`, description: nt.description, parameters: nt.parameters, strict: nt.strict });
+      }
+      continue;
+    }
     const fn = t.function || t;
     if (!fn.name) continue; // skip built-in tools (web_search, etc.) with no function shape
-    out.push({ name: fn.name, description: fn.description, parameters: fn.parameters, strict: t.strict ?? fn.strict });
+    defs.push({ name: fn.name, description: fn.description, parameters: fn.parameters, strict: t.strict ?? fn.strict });
   }
-  return out.length ? out : undefined;
+  return { defs: defs.length ? defs : undefined, namespaces: namespaces.length ? namespaces : undefined };
+}
+
+// Reverse of the parseTools flattening: `multi_agent_v1__spawn_agent` -> {namespace, name}.
+// Only splits under a namespace the request actually declared — MCP tool names legitimately
+// contain '__' and must pass through untouched.
+function splitNamespaced(flat: string, namespaces?: string[]): { name: string; namespace?: string } {
+  for (const ns of namespaces || []) {
+    if (flat.startsWith(ns + '__')) return { namespace: ns, name: flat.slice(ns.length + 2) };
+  }
+  return { name: flat };
 }
 
 export const codexAgent: AgentAdapter = {
@@ -187,12 +213,14 @@ export const codexAgent: AgentAdapter = {
     const all = responsesInputToMessages(body.input);
     const messages = all.filter((m) => m.role !== 'system');
     const sysFromInput = all.filter((m) => m.role === 'system').map((m) => m.content).join('\n');
+    const { defs: tools, namespaces } = parseTools(body.tools);
     // Combine top-level instructions with any developer/system input (don't drop either).
     return {
       model: body.model || 'codex',
       system: [body.instructions, sysFromInput].filter(Boolean).join('\n') || undefined,
       messages,
-      tools: parseTools(body.tools),
+      tools,
+      toolNamespaces: namespaces,
       toolChoice: body.tool_choice,
       parallelToolCalls: body.parallel_tool_calls,
       stream: body.stream !== false,
@@ -245,10 +273,13 @@ export const codexAgent: AgentAdapter = {
       const itemId = 'fc_' + (ev.id || idx);
       const callId = ev.id || itemId;
       const args = ev.arguments || '{}';
-      const item = { id: itemId, type: 'function_call', call_id: callId, name: ev.name, arguments: args };
+      // Namespace-flattened names go back as {name, namespace} — codex routes on the pair.
+      const { name, namespace } = splitNamespaced(ev.name, ctx.toolNamespaces);
+      const nsField = namespace ? { namespace } : {};
+      const item = { id: itemId, type: 'function_call', call_id: callId, name, ...nsField, arguments: args };
       ctx.items!.push(item);
       return out
-        + resp('response.output_item.added', { type: 'response.output_item.added', output_index: idx, item: { id: itemId, type: 'function_call', call_id: callId, name: ev.name, arguments: '' } })
+        + resp('response.output_item.added', { type: 'response.output_item.added', output_index: idx, item: { id: itemId, type: 'function_call', call_id: callId, name, ...nsField, arguments: '' } })
         + resp('response.function_call_arguments.delta', { type: 'response.function_call_arguments.delta', item_id: itemId, output_index: idx, delta: args })
         + resp('response.function_call_arguments.done', { type: 'response.function_call_arguments.done', item_id: itemId, output_index: idx, arguments: args })
         + resp('response.output_item.done', { type: 'response.output_item.done', output_index: idx, item });
@@ -261,11 +292,12 @@ export const codexAgent: AgentAdapter = {
     return out + resp('response.completed', { type: 'response.completed', response: { id: ctx.id, object: 'response', status: 'completed', model: ctx.model, output: ctx.items } });
   },
 
-  formatResponse(resp: CommonResponse, _req: CommonRequest) {
+  formatResponse(resp: CommonResponse, req: CommonRequest) {
     const output: any[] = [];
     if (resp.text) output.push({ type: 'message', role: 'assistant', content: [{ type: 'output_text', text: resp.text }] });
     for (const tc of resp.toolCalls || []) {
-      output.push({ id: 'fc_' + tc.id, type: 'function_call', call_id: tc.id, name: tc.name, arguments: tc.arguments || '{}' });
+      const { name, namespace } = splitNamespaced(tc.name, req.toolNamespaces);
+      output.push({ id: 'fc_' + tc.id, type: 'function_call', call_id: tc.id, name, ...(namespace ? { namespace } : {}), arguments: tc.arguments || '{}' });
     }
     if (!output.length) output.push({ type: 'message', role: 'assistant', content: [{ type: 'output_text', text: '' }] });
     return { id: 'resp_asx', object: 'response', status: 'completed', output };

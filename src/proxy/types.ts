@@ -38,6 +38,9 @@ export interface CommonRequest {
   system?: string;        // system prompt / instructions
   messages: CommonMessage[];
   tools?: CommonToolDef[]; // normalized tool definitions (translated across wires)
+  // Codex namespace tool groups (e.g. 'multi_agent_v1') flattened into `${ns}__${name}` defs;
+  // the response side needs this list to split flat names back into namespaced calls.
+  toolNamespaces?: string[];
   toolChoice?: any;        // pass-through hint ('auto' | 'none' | 'required' | {name})
   parallelToolCalls?: boolean; // allow the model to emit multiple tool calls per turn
   stream: boolean;
@@ -102,6 +105,7 @@ export interface StreamCtx {
   textIndex?: number;    // output/content index reserved for streamed text
   nextIndex?: number;    // next free output index (text item + one per tool call)
   items?: any[];         // wire output items assembled so far (for final framing)
+  toolNamespaces?: string[]; // from CommonRequest — split `${ns}__${name}` back into namespaced calls
 }
 
 export interface ProxyStartOptions {
