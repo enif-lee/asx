@@ -98,7 +98,7 @@ asx e personal.zai codex "use ZAI through Codex UI"
 
 ### Sharing flags (per profile)
 
-Control what an isolated agent profile shares from the provider's system home (`~/.claude`, `~/.codex`, `~/.grok`). System profiles and backend-only profiles such as ZAI do not accept sharing flags. Default is **share everything**; only the credential is per-profile. Categories: `sessions`, `skills`, `agents`, `hooks`, `commands`, `settings`. Accepted by `asx login` and `asx sharing`:
+Control what an isolated agent profile shares from the provider's system home (`~/.claude`, `~/.codex`, `~/.grok`). System profiles and backend-only profiles such as ZAI do not accept sharing flags. Default is **share everything supported by that provider**; only the credential is per-profile. Claude supports `sessions`, `skills`, `agents`, `hooks`, `settings`; Codex and Grok support `sessions`, `skills`, `settings`. Accepted by `asx login` and `asx sharing`:
 
 | Flag | Effect |
 |------|--------|
@@ -141,7 +141,7 @@ More providers can be added easily via the adapter pattern.
 - `asx login zai [name]` asks for an API key, validates it with `GET https://api.z.ai/api/coding/paas/v4/models`, then stores it in the profile home.
 - Claude long-lived token profiles only update asx's active marker on `switch`; `exec` injects `CLAUDE_CODE_OAUTH_TOKEN`.
 - `exec` / `e` keeps system profiles on the provider's normal home path. For isolated profiles it injects the provider's home env var (`CLAUDE_CONFIG_DIR` / `CODEX_HOME` / `GROK_HOME`) to point at the isolated profile home.
-  - Session history and shared setup (`projects`/`sessions`/`history`, plus `skills`/`agents`/`hooks`/`commands`/`settings`) are **symlinked** from the provider's system home (`~/.claude`, `~/.codex`, `~/.grok`) into isolated agent profiles. Backend-only profiles do not participate.
+  - Session history and shared setup (`projects`/`sessions`/`history`, plus provider-supported `skills`/`agents`/`hooks`/`settings`) are **symlinked** from the provider's system home (`~/.claude`, `~/.codex`, `~/.grok`) into isolated agent profiles. Backend-only profiles do not participate.
   - Cross-provider runs launch the agent binary under a dedicated scratch home (with a dummy stub so it skips its own login) and route real requests through the local ASX Proxy using the profile's backend credential.
   - `-b / --bypass` automatically injects the appropriate full-access flags for the provider.
 - `list` (and `list -u`) detects the *live* credential currently loaded in the system (native keychain/auth files) and annotates the matching stored account with `(current in system)`.

@@ -2,7 +2,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { linkSharedState, parseCategories, describeShare } from './shared-state.js';
+import { linkSharedState, parseCategories, parseCategoriesForProvider, describeShare, supportedShareCategories } from './shared-state.js';
 
 describe('linkSharedState (symlink shared history/settings into a profile home)', () => {
   let home: string;
@@ -132,8 +132,17 @@ describe('parseCategories / describeShare', () => {
   });
 
   it('describes the share value', () => {
-    expect(describeShare(undefined)).toBe('shared: sessions, skills, agents, hooks, commands, settings');
-    expect(describeShare([])).toBe('isolated: sessions, skills, agents, hooks, commands, settings');
-    expect(describeShare(['sessions', 'skills'])).toBe('shared: sessions, skills (isolated: agents, hooks, commands, settings)');
+    expect(describeShare(undefined)).toBe('shared: sessions, skills, agents, hooks, settings');
+    expect(describeShare([], 'claude')).toBe('isolated: sessions, skills, agents, hooks, settings');
+    expect(describeShare(undefined, 'codex')).toBe('shared: sessions, skills, settings');
+    expect(describeShare(['sessions', 'skills', 'agents'], 'codex')).toBe('shared: sessions, skills (isolated: settings)');
+    expect(describeShare(['agents'], 'codex')).toBe('isolated: sessions, skills, settings');
+  });
+
+  it('validates provider-specific categories', () => {
+    expect(supportedShareCategories('claude')).toEqual(['sessions', 'skills', 'agents', 'hooks', 'settings']);
+    expect(supportedShareCategories('codex')).toEqual(['sessions', 'skills', 'settings']);
+    expect(() => parseCategories('commands')).toThrow(/Unknown share categor/);
+    expect(() => parseCategoriesForProvider('agents', 'codex')).toThrow(/codex does not support/);
   });
 });

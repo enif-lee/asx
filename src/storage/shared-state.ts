@@ -5,7 +5,7 @@ import { getHomeDotDir } from '../utils/platform.js';
 // Categories an isolated agent profile can independently share from / isolate
 // against the user's system provider home. A profile stores the subset it shares (see account-store
 // `share`): undefined => all categories, [] => fully isolated.
-export const SHARE_CATEGORIES = ['sessions', 'skills', 'agents', 'hooks', 'commands', 'settings'] as const;
+export const SHARE_CATEGORIES = ['sessions', 'skills', 'agents', 'hooks', 'settings'] as const;
 export type ShareCategory = (typeof SHARE_CATEGORIES)[number];
 
 type Entry = { name: string; type: 'dir' | 'file'; cat: ShareCategory };
@@ -26,7 +26,6 @@ const SHARED: Record<string, Entry[]> = {
     { name: 'skills', type: 'dir', cat: 'skills' },
     { name: 'agents', type: 'dir', cat: 'agents' },
     { name: 'hooks', type: 'dir', cat: 'hooks' },
-    { name: 'commands', type: 'dir', cat: 'commands' },
     { name: 'plugins', type: 'dir', cat: 'settings' },
     { name: 'settings.json', type: 'file', cat: 'settings' },
     { name: 'CLAUDE.md', type: 'file', cat: 'settings' },
@@ -82,6 +81,21 @@ export function parseCategories(csv: string): ShareCategory[] {
   return [...new Set(parts)] as ShareCategory[];
 }
 
+export function supportedShareCategories(provider: string): ShareCategory[] {
+  const cats = new Set((SHARED[providerKey(provider)] || []).map((e) => e.cat));
+  return SHARE_CATEGORIES.filter((c) => cats.has(c));
+}
+
+export function parseCategoriesForProvider(csv: string, provider: string): ShareCategory[] {
+  const cats = parseCategories(csv);
+  const supported = supportedShareCategories(provider);
+  const unsupported = cats.filter((c) => !supported.includes(c));
+  if (unsupported.length) {
+    throw new Error(`${provider} does not support share categor${unsupported.length > 1 ? 'ies' : 'y'}: ${unsupported.join(', ')}. Valid: ${supported.join(', ')}`);
+  }
+  return cats;
+}
+
 // Symlink shared session/history/settings state from the provider's system home
 // into an isolated profile (or cross-provider agent) home. `categories` limits which
 // categories are shared: undefined => all, [] => none (fully isolated). Best-effort:
@@ -119,9 +133,12 @@ export function linkSharedState(
 }
 
 // Human-readable summary of a profile's `share` value for `list` / `sharing`.
-export function describeShare(share: string[] | undefined): string {
-  if (share === undefined) return `shared: ${SHARE_CATEGORIES.join(', ')}`;
-  if (share.length === 0) return `isolated: ${SHARE_CATEGORIES.join(', ')}`;
-  const isolated = SHARE_CATEGORIES.filter((c) => !share.includes(c));
-  return `shared: ${share.join(', ')}${isolated.length ? ` (isolated: ${isolated.join(', ')})` : ''}`;
+export function describeShare(share: string[] | undefined, provider?: string): string {
+  const categories = provider ? supportedShareCategories(provider) : SHARE_CATEGORIES;
+  if (share === undefined) return `shared: ${categories.join(', ')}`;
+  if (share.length === 0) return `isolated: ${categories.join(', ')}`;
+  const shared = share.filter((c): c is ShareCategory => categories.includes(c as ShareCategory));
+  if (shared.length === 0) return `isolated: ${categories.join(', ')}`;
+  const isolated = categories.filter((c) => !shared.includes(c));
+  return `shared: ${shared.join(', ')}${isolated.length ? ` (isolated: ${isolated.join(', ')})` : ''}`;
 }

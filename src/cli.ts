@@ -11,7 +11,7 @@ import { getAsxProfilesDir } from './utils/platform.js';
 import { listAccounts, getActive, getAccountByName, getAccount, setShare, setProfileType, type AccountRecord } from './storage/account-store.js';
 import { getSecret } from './storage/secure-store.js';
 import { getProfileHome, safeProfileDirName } from './storage/profile-home.js';
-import { linkSharedState, parseCategories, describeShare, SHARE_CATEGORIES } from './storage/shared-state.js';
+import { linkSharedState, parseCategories, parseCategoriesForProvider, describeShare, supportedShareCategories, SHARE_CATEGORIES } from './storage/shared-state.js';
 import { dlog } from './utils/log.js';
 
 function getProviderShortName(provider: string): string {
@@ -151,7 +151,7 @@ function isKnownProviderSync(p: string): boolean { return provIndex.isKnownProvi
 function withShareFlags(cmd: Command): Command {
   return cmd
     .option('--isolated', 'Fully isolate this profile (share nothing from the default provider home)')
-    .option('--shared', 'Share all state (session history, skills, agents, hooks, commands, settings) — the default')
+    .option('--shared', 'Share all provider-supported state (the default)')
     .option('--share <categories>', `Share only these comma-separated categories (${SHARE_CATEGORIES.join(', ')})`)
     .option('--isolate <categories>', 'Share everything except these comma-separated categories');
 }
@@ -160,15 +160,17 @@ interface ShareOpts { isolated?: boolean; shared?: boolean; share?: string; isol
 // Resolve share flags into the value to persist. Returns { provided:false } when no
 // flag was passed (leave the profile's setting untouched). `value` follows the store
 // convention: undefined => share all, [] => isolated, [...] => that subset.
-function resolveShareFlags(o: ShareOpts): { provided: boolean; value?: string[] } {
+function resolveShareFlags(o: ShareOpts, provider?: string): { provided: boolean; value?: string[] } {
   const set = [o.isolated, o.shared, o.share, o.isolate].filter((x) => x !== undefined);
   if (set.length === 0) return { provided: false };
   if (set.length > 1) throw new Error('Use only one of --isolated / --shared / --share / --isolate.');
   if (o.isolated) return { provided: true, value: [] };
   if (o.shared) return { provided: true, value: undefined };
-  if (o.share !== undefined) return { provided: true, value: parseCategories(o.share) };
-  const exclude = parseCategories(o.isolate!);
-  return { provided: true, value: SHARE_CATEGORIES.filter((c) => !exclude.includes(c)) };
+  const parse = provider ? (s: string) => parseCategoriesForProvider(s, provider) : parseCategories;
+  if (o.share !== undefined) return { provided: true, value: parse(o.share) };
+  const exclude = parse(o.isolate!);
+  const base = provider ? supportedShareCategories(provider) : SHARE_CATEGORIES;
+  return { provided: true, value: base.filter((c) => !exclude.includes(c)) };
 }
 
 const program = new Command();
@@ -256,7 +258,7 @@ program
           } catch {}
         }
 
-        const sharePart = canShowSharing(a) && !currentInSystem ? chalk.yellow(` [${describeShare(a.share)}]`) : '';
+        const sharePart = canShowSharing(a) && !currentInSystem ? chalk.yellow(` [${describeShare(a.share, p)}]`) : '';
 
         console.log(`${star} ${a.name}${emailPart}${labelPart}${systemMark}${sharePart}`);
 
@@ -531,9 +533,6 @@ withShareFlags(program
   .action(async (a?: string, b?: string, opts: { longLived?: boolean } & ShareOpts = {}) => {
     const { provider, name } = resolveProviderName(a, b);
     if (!provider) { console.error(chalk.red('Specify a provider or a profile name. e.g. asx login claude | asx login jn.claude')); process.exit(1); }
-    let share: { provided: boolean; value?: string[] };
-    try { share = resolveShareFlags(opts); }
-    catch (e: any) { console.error(chalk.red(e.message || e)); process.exit(1); }
     let adapter: any;
     try {
       adapter = getAdapter(provider);
@@ -542,6 +541,9 @@ withShareFlags(program
       return;
     }
     const storedProvider = adapter.name || provider;
+    let share: { provided: boolean; value?: string[] };
+    try { share = resolveShareFlags(opts, storedProvider); }
+    catch (e: any) { console.error(chalk.red(e.message || e)); process.exit(1); }
     const systemHome = !!name && await isCurrentSystemProfile(storedProvider, name, adapter);
     if (systemHome && share!.provided) {
       console.error(chalk.red('Current system profiles cannot use --shared/--isolated/--share/--isolate.'));
@@ -636,7 +638,7 @@ program
 
 withShareFlags(program
   .command('sharing <name>')
-  .description(`Show or change what a profile shares from the provider's default home.\nCategories: ${SHARE_CATEGORIES.join(', ')}. With no flags, prints the current setting.\nExamples:\n  asx sharing ed.claude --isolated\n  asx sharing ed.claude --share sessions,skills\n  asx sharing ed.claude --isolate settings`))
+  .description(`Show or change what a profile shares from the provider's default home.\nCategories vary by provider. With no flags, prints the current setting.\nExamples:\n  asx sharing ed.claude --isolated\n  asx sharing ed.claude --share sessions,skills\n  asx sharing ed.claude --isolate settings`))
   .action(async (name: string, opts: ShareOpts = {}) => {
     const acc = getAccountByName(name);
     if (!acc) { console.error(chalk.red(`No account found with name "${name}"`)); process.exit(1); }
@@ -650,14 +652,14 @@ withShareFlags(program
       process.exit(1);
     }
     let share: { provided: boolean; value?: string[] };
-    try { share = resolveShareFlags(opts); }
+    try { share = resolveShareFlags(opts, acc.provider); }
     catch (e: any) { console.error(chalk.red(e.message || e)); process.exit(1); }
     if (share!.provided) {
       setShare(acc.provider, acc.name, share!.value);
       console.log(chalk.green(`Updated sharing for ${acc.provider}/${acc.name}`));
     }
     const cur = getAccount(acc.provider, acc.name);
-    console.log(`${acc.provider}/${acc.name}: ${describeShare(cur?.share)}`);
+    console.log(`${acc.provider}/${acc.name}: ${describeShare(cur?.share, acc.provider)}`);
   });
 
 program

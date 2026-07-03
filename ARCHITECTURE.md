@@ -280,7 +280,7 @@ Shared-state symlinks are category-controlled for isolated agent profiles:
 - `share: []`: share nothing.
 - `share: ["sessions", ...]`: share only those categories.
 
-Supported categories are `sessions`, `skills`, `agents`, `hooks`, `commands`, and `settings`.
+Supported categories are provider-specific. Claude supports `sessions`, `skills`, `agents`, `hooks`, and `settings`; Codex and Grok support `sessions`, `skills`, and `settings`.
 
 ### Cross-Provider Execution
 
