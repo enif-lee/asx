@@ -95,9 +95,11 @@ describe('fetchUpstreamWithRetry', () => {
   it('does not retry a 200-with-1305 when the backend has no isRetryable hook', async () => {
     let n = 0;
     const fetchImpl = (async () => { n++; return overload200(); }) as any;
-    const { res } = await fetchUpstreamWithRetry(up, {}, { fetchImpl, sleep: noSleep });
+    const { res, errText } = await fetchUpstreamWithRetry(up, {}, { fetchImpl, sleep: noSleep });
     expect(n).toBe(1);
     expect(res.status).toBe(200);
+    expect(errText).toBeUndefined();
+    await expect(res.text()).resolves.toContain('1305');
   });
 
   it('does not retry a non-retryable 400', async () => {

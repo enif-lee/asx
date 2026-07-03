@@ -283,7 +283,9 @@ export async function fetchUpstreamWithRetry(
     lastRes = res;
     const ct = res.headers.get('content-type') || '';
     // Happy path: a streaming body — hand it back untouched so the caller can pipe it.
-    if (res.ok && ct.includes('event-stream')) return { res };
+    // Some upstreams stream SSE with a generic content-type; only providers with
+    // body-level retry signals need a 200 body inspection.
+    if (res.ok && (ct.includes('event-stream') || !backend?.isRetryable)) return { res };
     // Otherwise read the (small) body to inspect for an overload code / non-stream error.
     const text = await res.text().catch(() => '');
     lastText = text;
