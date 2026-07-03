@@ -8,7 +8,7 @@ import { getAdapter, listKnownProviders } from './providers/index.js';
 import * as provIndex from './providers/index.js';
 import { getClaudeCodeOAuthToken, isClaudeCodeLongLivedToken } from './providers/claude-code.js';
 import { getAsxProfilesDir } from './utils/platform.js';
-import { listAccounts, getActive, getAccountByName, getAccount, setShare } from './storage/account-store.js';
+import { listAccounts, getActive, getAccountByName, getAccount, setShare, setProfileType, type AccountRecord } from './storage/account-store.js';
 import { getSecret } from './storage/secure-store.js';
 import { getProfileHome, safeProfileDirName } from './storage/profile-home.js';
 import { linkSharedState, parseCategories, describeShare, SHARE_CATEGORIES } from './storage/shared-state.js';
@@ -54,6 +54,7 @@ const AGENT_SPEC: Record<string, AgentSpec> = {
   grok: { bin: 'grok', homeEnv: 'GROK_HOME', file: 'auth.json', bypass: ['--dangerously-skip-permissions'], stub: null },
 };
 const agentSpec = (provider: string): AgentSpec | undefined => AGENT_SPEC[provider.includes('claude') ? 'claude' : provider];
+const isAgentProvider = (provider: string): boolean => !!agentSpec(provider);
 
 function spawnNative(cmd: string, args: string[], opts: SpawnOptions) {
   return spawn(cmd, args, { ...opts, shell: process.platform === 'win32' });
@@ -77,6 +78,21 @@ function seedAgentHome(provider: string, dir: string) {
 function ensureHome700(dir: string): void {
   fs.mkdirSync(dir, { recursive: true });
   try { fs.chmodSync(dir, 0o700); } catch {}
+}
+
+async function isCurrentSystemProfile(provider: string, name: string, adapter: any): Promise<boolean> {
+  try {
+    const live = await (adapter.getCurrentCredential?.() ?? Promise.resolve(null));
+    if (!live) return false;
+    const stored = await getSecret(provider, name);
+    return stored === live;
+  } catch {
+    return false;
+  }
+}
+
+function canShowSharing(account: AccountRecord): boolean {
+  return account.profileType !== 'system' && isAgentProvider(account.provider);
 }
 
 // In cross-provider exec the launched agent binary is NOT the profile's provider,
@@ -159,7 +175,7 @@ const program = new Command();
 
 program
   .name('asx')
-  .description('Multi-account LLM provider switcher (claude, codex, zai, grok, cursor). Credentials in per-profile 0600 files under the asx config dir. (renamed from "as" to avoid conflict with LLVM as)')
+  .description('Multi-account LLM provider switcher (claude, codex, zai, grok, cursor). Credentials live in provider-native profile stores. (renamed from "as" to avoid conflict with LLVM as)')
   .version('0.3.0');
 
 program
@@ -229,16 +245,18 @@ program
         const labelPart = a.label && a.label !== a.name ? ` (${a.label})` : '';
 
         let systemMark = '';
+        let currentInSystem = false;
         if (liveCredential && getSecretFn) {
           try {
             const stored = await getSecretFn(p, a.name);
             if (stored === liveCredential) {
+              currentInSystem = true;
               systemMark = chalk.cyan(' (current in system)');
             }
           } catch {}
         }
 
-        const sharePart = chalk.yellow(` [${describeShare(a.share)}]`);
+        const sharePart = canShowSharing(a) && !currentInSystem ? chalk.yellow(` [${describeShare(a.share)}]`) : '';
 
         console.log(`${star} ${a.name}${emailPart}${labelPart}${systemMark}${sharePart}`);
 
@@ -278,6 +296,10 @@ withShareFlags(program
     let share: { provided: boolean; value?: string[] };
     try { share = resolveShareFlags(opts); }
     catch (e: any) { console.error(chalk.red(e.message || e)); process.exit(1); }
+    if (share.provided) {
+      console.error(chalk.red('System profiles created by `asx load` cannot use --shared/--isolated/--share/--isolate.'));
+      process.exit(1);
+    }
     // No provider: scan every known agent configured on this machine (not a fixed list).
     const targets: Array<{provider: string, explicitName?: string}> = provider
       ? [{ provider, explicitName: name }]
@@ -324,7 +346,7 @@ withShareFlags(program
         // Prefer the local credential: loadCurrent() snapshots the native cred, so a
         // stored profile that differs is overwritten with the local one.
         await adapter.loadCurrent(finalName);
-        if (share!.provided) setShare(p, finalName, share!.value);
+        setProfileType(p, finalName, 'system');
         any = true;
 
         const verb = existingCred === null ? 'Loaded'
@@ -346,7 +368,7 @@ withShareFlags(program
 // Non-destructive re-login flow: save current session, clear local, run native login,
 // load the new session. Reused by `asx login` and by `asx refresh` when a token is revoked.
 // Returns the final account name on success, or null on failure.
-async function runLoginFlow(p: string, adapter: any, name?: string, opts: { longLived?: boolean } = {}): Promise<string | null> {
+async function runLoginFlow(p: string, adapter: any, name?: string, opts: { longLived?: boolean; systemHome?: boolean } = {}): Promise<string | null> {
   const isClaude = p === 'claude' || p === 'claude-code';
   if (isClaude && opts.longLived && typeof adapter.loadLongLivedToken === 'function') {
     const loginCmd = ['claude', 'setup-token'];
@@ -390,11 +412,11 @@ async function runLoginFlow(p: string, adapter: any, name?: string, opts: { long
     return null;
   }
 
-  if (isClaude) {
+  if (isClaude && !opts.systemHome) {
     const targetName = name || deriveAccountName(undefined, p);
     const spec = agentSpec('claude')!;
-    // Log in directly into the profile home so the native .credentials.json lands
-    // in the SSOT location; loadCurrent then snapshots it in place.
+    // Log in directly into the profile home so Claude uses the profile-scoped
+    // credential store (macOS Keychain hash or .credentials.json fallback).
     const dir = getProfileHome('claude', targetName);
     ensureHome700(dir);
     seedAgentHome('claude', dir);
@@ -419,6 +441,49 @@ async function runLoginFlow(p: string, adapter: any, name?: string, opts: { long
       if (prev === undefined) delete process.env.CLAUDE_CONFIG_DIR;
       else process.env.CLAUDE_CONFIG_DIR = prev;
     }
+  }
+
+  const loginInHome = async (targetName: string, home: string | null) => {
+    const [cmd, ...args] = loginCmd;
+    const spec = agentSpec(p);
+    const env = home && spec ? { ...process.env, [spec.homeEnv]: home } : process.env;
+    console.log(chalk.cyan(`Launching native login: ${loginCmd.join(' ')}${home && spec ? ` (${spec.homeEnv}=${home})` : ''}`));
+    console.log(chalk.gray('Complete the login in the opened browser/terminal...'));
+    const exitCode = await runCommand(cmd, args, { env });
+    if (exitCode !== 0) console.log(chalk.yellow(`Native login exited with code ${exitCode}.`));
+
+    const prev = spec ? process.env[spec.homeEnv] : undefined;
+    try {
+      if (home && spec) process.env[spec.homeEnv] = home;
+      await adapter.loadCurrent(targetName);
+      console.log(chalk.green(`Loaded ${p}/${targetName} after login.`));
+      return targetName;
+    } catch (e: any) {
+      console.error(chalk.red(`Failed to load new session: ${e.message || e}`));
+      return null;
+    } finally {
+      if (spec) {
+        if (prev === undefined) delete process.env[spec.homeEnv];
+        else process.env[spec.homeEnv] = prev;
+      }
+    }
+  };
+
+  // Existing current-in-system profiles keep the provider's normal home path.
+  if (opts.systemHome) {
+    const targetName = name || deriveAccountName(undefined, p);
+    return loginInHome(targetName, null);
+  }
+
+  // Native agent providers logged in through `asx login` get an isolated profile home.
+  const spec = agentSpec(p);
+  if (spec) {
+    const targetName = name || deriveAccountName(undefined, p);
+    const dir = getProfileHome(p, targetName);
+    ensureHome700(dir);
+    seedAgentHome(p, dir);
+    try { fs.unlinkSync(path.join(dir, spec.file)); } catch {}
+    return loginInHome(targetName, dir);
   }
 
   // 1. Save existing session (non-destructive)
@@ -476,8 +541,17 @@ withShareFlags(program
       console.error(chalk.red(e.message || e));
       return;
     }
-    const finalName = await runLoginFlow(provider, adapter, name, opts);
-    if (finalName && share!.provided) setShare(provider, finalName, share!.value);
+    const storedProvider = adapter.name || provider;
+    const systemHome = !!name && await isCurrentSystemProfile(storedProvider, name, adapter);
+    if (systemHome && share!.provided) {
+      console.error(chalk.red('Current system profiles cannot use --shared/--isolated/--share/--isolate.'));
+      process.exit(1);
+    }
+    const finalName = await runLoginFlow(storedProvider, adapter, name, { ...opts, systemHome });
+    if (finalName) {
+      setProfileType(storedProvider, finalName, systemHome ? 'system' : 'isolated');
+      if (!systemHome && share!.provided) setShare(storedProvider, finalName, share!.value);
+    }
   });
 
 program
@@ -563,9 +637,18 @@ program
 withShareFlags(program
   .command('sharing <name>')
   .description(`Show or change what a profile shares from the provider's default home.\nCategories: ${SHARE_CATEGORIES.join(', ')}. With no flags, prints the current setting.\nExamples:\n  asx sharing ed.claude --isolated\n  asx sharing ed.claude --share sessions,skills\n  asx sharing ed.claude --isolate settings`))
-  .action((name: string, opts: ShareOpts = {}) => {
+  .action(async (name: string, opts: ShareOpts = {}) => {
     const acc = getAccountByName(name);
     if (!acc) { console.error(chalk.red(`No account found with name "${name}"`)); process.exit(1); }
+    if (!isAgentProvider(acc.provider)) {
+      console.error(chalk.red(`Sharing is only available for agent profiles (claude, codex, grok). ${acc.provider}/${acc.name} has no agent home to share.`));
+      process.exit(1);
+    }
+    const adapter = getAdapter(acc.provider);
+    if (acc.profileType === 'system' || await isCurrentSystemProfile(acc.provider, acc.name, adapter)) {
+      console.error(chalk.red(`Sharing is not available for system profile ${acc.provider}/${acc.name}.`));
+      process.exit(1);
+    }
     let share: { provided: boolean; value?: string[] };
     try { share = resolveShareFlags(opts); }
     catch (e: any) { console.error(chalk.red(e.message || e)); process.exit(1); }
@@ -606,7 +689,9 @@ program
     // Token dead → offer the interactive re-login flow (explicit command only).
     if (r.needsRelogin && opts.login !== false) {
       console.log(chalk.yellow(`\nRefresh token can't be used. Starting re-login for ${prov}/${name}...`));
-      const ok = await runLoginFlow(prov, adapter, name);
+      const acc = getAccount(prov, name);
+      const systemHome = acc?.profileType === 'system' || await isCurrentSystemProfile(prov, name, adapter);
+      const ok = await runLoginFlow(prov, adapter, name, { systemHome });
       process.exit(ok ? 0 : 1);
     }
     process.exit(1);
@@ -750,9 +835,19 @@ program
       if (!isCross && normalizeProvider(agentProvider) === 'claude' && claudeLongLivedToken) {
         env.CLAUDE_CODE_OAUTH_TOKEN = claudeLongLivedToken;
       }
-      // Always run under a home injected via the provider's home env var — the
-      // native binary never touches the user's default location.
+      const profileAdapter = getAdapter(profileProvider);
+      const systemProfile = acct.profileType === 'system' || await isCurrentSystemProfile(profileProvider, accountName, profileAdapter);
       if (!isCross) {
+        if (systemProfile) {
+          // System profiles intentionally use the provider's normal user-level
+          // home (~/.codex, ~/.claude, ~/.grok). No env override, no symlink setup.
+          const live = await (profileAdapter.getCurrentCredential?.() ?? Promise.resolve(null));
+          const stored = await readProfileSecret();
+          if (stored && live && stored !== live) {
+            console.error(chalk.red(`${profileProvider}/${accountName} is a system profile but is not current in system. Run: asx switch ${accountName}`));
+            process.exit(1);
+          }
+        } else {
         // Same provider: the profile home already holds the credential at the
         // native filename (SSOT). Point the binary at it directly — no copy.
         const home = getProfileHome(profileProvider, accountName);
@@ -772,6 +867,7 @@ program
           }
           // cred already lives at getProfileCredentialPath(profileProvider, accountName),
           // which equals <home>/<native file>. Nothing to materialize.
+        }
         }
       } else {
         // Cross: the agent binary runs under a dedicated scratch home with a dummy

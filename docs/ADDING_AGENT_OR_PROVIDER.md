@@ -66,8 +66,9 @@ Rules:
 
 - Each profile's home directory is the source of truth for its stored credential.
 - `setSecret`/`getSecret` read/write a `0600` file inside the profile home (`<asx config>/profiles/<provider>-<name>/`), named to match the provider's native auth file so the same directory can be handed to the native CLI via its home env var.
+- `asx load` creates system profiles that use the provider's normal user-level home at runtime; `asx login` creates isolated profiles unless the target profile is already current in system.
 - Account metadata belongs in `src/storage/account-store.ts`, not with the credential.
-- Storage is plain `0600` files under the asx config dir — there is no OS keychain.
+- Prefer plain `0600` files under the asx config dir. Use provider-native secure storage only when the provider itself does so, such as Claude on macOS Keychain.
 - Do not store secrets in README, config samples, tests, or logs.
 - Preserve the provider's native credential shape when snapshotting. If the native file is a JSON wrapper, store the wrapper unless there is a clear reason to extract one field.
 

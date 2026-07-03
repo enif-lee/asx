@@ -93,15 +93,15 @@ The CLI does orchestration only. Provider-specific credential rules live in prov
 
 ASX keeps secrets and metadata separate.
 
-- `src/storage/profile-home.ts` maps `(provider, name)` to a stable profile home and native auth filename.
-- `src/storage/secure-store.ts` stores credentials as `0600` files inside those profile homes.
-- `src/storage/account-store.ts` stores account metadata, labels, email, and active markers.
-- `src/storage/shared-state.ts` symlinks selected history/settings state from the provider's default home into the profile or scratch home.
+- `src/storage/profile-home.ts` maps isolated `(provider, name)` profiles to a stable profile home and native auth filename.
+- `src/storage/secure-store.ts` stores credentials as `0600` files, except Claude on macOS where the profile-specific Keychain service is the source of truth.
+- `src/storage/account-store.ts` stores account metadata, labels, email, profile type, and active markers.
+- `src/storage/shared-state.ts` symlinks selected history/settings state from the provider's system home into an isolated profile or scratch home.
 
 ```mermaid
 flowchart TD
   Config["ASX config dir"]
-  Accounts["accounts.json<br/>provider, name, label, email, share, addedAt"]
+  Accounts["accounts.json<br/>provider, name, label, email, profileType, share, addedAt"]
   Active[".active.json<br/>provider -> active profile name"]
   Profiles["profiles/"]
   ProfileHome["<provider>-<name>/<br/>0700 profile home"]
@@ -129,15 +129,20 @@ Linux:   ~/.config/asx/profiles/
 Windows: %APPDATA%/asx/profiles/
 ```
 
-There is no OS keychain item, `vault.json`, migration layer, or `/tmp` credential copy in the current storage model.
+There is no `vault.json`, migration layer, or `/tmp` credential copy in the current storage model. Claude on macOS is the exception to file storage: ASX uses Claude Code's profile-specific Keychain service.
 
-### Profile Homes vs Provider-Native State
+### System Profiles vs Isolated Profiles
 
-The profile home stores the ASX profile credential. Provider-native state is what the original tool reads when it runs normally without ASX.
+ASX has two profile types:
+
+- **system profile**: registered by `asx load`; uses the provider's normal user-level home path.
+- **isolated profile**: created by `asx login`; uses an ASX-owned profile home.
+
+Provider-native state is what the original tool reads when it runs normally without ASX.
 
 ```mermaid
 flowchart TD
-  ProfileHome["ASX profile home<br/>native auth file"]
+  ProfileHome["ASX isolated profile home<br/>native auth file or hashed Keychain key"]
 
   ClaudeNative["Claude native state<br/>macOS Keychain or .credentials.json"]
   CodexNative["Codex native state<br/>~/.codex/auth.json"]
@@ -149,9 +154,9 @@ flowchart TD
   ProfileHome -- "switch grok" --> GrokNative
   ProfileHome -- "switch zai updates ASX marker/env only" --> ZaiNative
 
-  ClaudeNative -- "load/login" --> ProfileHome
-  CodexNative -- "load/login" --> ProfileHome
-  GrokNative -- "load/login" --> ProfileHome
+  ClaudeNative -- "load registers system profile<br/>login creates isolated profile" --> ProfileHome
+  CodexNative -- "load registers system profile<br/>login creates isolated profile" --> ProfileHome
+  GrokNative -- "load registers system profile<br/>login creates isolated profile" --> ProfileHome
   ZaiNative -- "login API key" --> ProfileHome
 ```
 
@@ -183,9 +188,9 @@ Current provider mapping:
 
 ### Claude
 
-Claude native login is profile-scoped by setting `CLAUDE_CONFIG_DIR` to the profile home before running `claude auth login`.
+Claude native login for isolated profiles sets `CLAUDE_CONFIG_DIR` to the profile home before running `claude auth login`. On macOS, Claude stores OAuth credentials in the Keychain service `Claude Code-credentials-<sha256(CLAUDE_CONFIG_DIR)[:8]>`; on Linux/Windows, it uses `.credentials.json`. If the target profile is current in system, ASX does not override `CLAUDE_CONFIG_DIR`.
 
-Normal Claude profiles store access/refresh credentials in `.credentials.json`. Claude long-lived profiles store a wrapper containing `CLAUDE_CODE_OAUTH_TOKEN`; `exec` injects that value into the spawned process.
+Normal Claude profiles store access/refresh credentials in the provider-native store: macOS Keychain for Claude Code, `.credentials.json` on Linux/Windows. Claude long-lived profiles store a wrapper containing `CLAUDE_CODE_OAUTH_TOKEN`; `exec` injects that value into the spawned process.
 
 Profile homes are stable, so concurrent Claude sessions for the same ASX profile share Claude's own credential file.
 
@@ -252,7 +257,7 @@ Agent home selection is controlled through provider home env vars:
 
 ### Same-Provider Execution
 
-When profile provider and agent provider are the same, ASX runs the native tool with the profile home as the native home. The credential is already there, so ASX does not copy it before launch or sync it back after exit.
+When profile provider and agent provider are the same, ASX runs system profiles on the provider's normal home path. Isolated profiles run with the profile home as the native home.
 
 ```mermaid
 flowchart TD
@@ -269,7 +274,7 @@ flowchart TD
 
 No ASX Proxy is needed because the launched agent already speaks the backend provider's native wire format.
 
-Shared-state symlinks are category-controlled per profile:
+Shared-state symlinks are category-controlled for isolated agent profiles:
 
 - unset `share`: share all categories.
 - `share: []`: share nothing.

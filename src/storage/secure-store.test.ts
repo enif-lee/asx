@@ -3,6 +3,29 @@ import os from 'node:os';
 import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
+const keychain = vi.hoisted(() => new Map<string, string>());
+
+vi.mock('node:child_process', () => ({
+  execFileSync: vi.fn((cmd: string, args: string[]) => {
+    if (cmd !== 'security') return '';
+    const service = args[args.indexOf('-s') + 1];
+    if (args[0] === 'find-generic-password') {
+      const value = keychain.get(service);
+      if (!value) throw new Error('not found');
+      return value;
+    }
+    if (args[0] === 'add-generic-password') {
+      keychain.set(service, args[args.indexOf('-w') + 1]);
+      return '';
+    }
+    if (args[0] === 'delete-generic-password') {
+      keychain.delete(service);
+      return '';
+    }
+    return '';
+  }),
+}));
+
 function configDir(home: string): string {
   if (process.platform === 'win32') return path.join(home, 'AppData', 'Roaming', 'asx');
   if (process.platform === 'darwin') return path.join(home, 'Library', 'Application Support', 'asx');
@@ -12,7 +35,7 @@ function profileHome(home: string, dirName: string): string {
   return path.join(configDir(home), 'profiles', dirName);
 }
 
-describe('secure store (profile-home file backend)', () => {
+describe('secure store (profile-home backend)', () => {
   let home: string;
   let prevHome: string | undefined;
   let prevAppData: string | undefined;
@@ -20,6 +43,7 @@ describe('secure store (profile-home file backend)', () => {
 
   beforeEach(() => {
     vi.resetModules();
+    keychain.clear();
     home = fs.mkdtempSync(path.join(os.tmpdir(), 'asx-secure-store-'));
     prevHome = process.env.HOME;
     prevAppData = process.env.APPDATA;
@@ -44,7 +68,11 @@ describe('secure store (profile-home file backend)', () => {
     await store.setSecret('zai', 'key1', 'sk-zai');
 
     expect(fs.readFileSync(profileHome(home, 'codex-work') + '/auth.json', 'utf8')).toBe('codex-cred');
-    expect(fs.readFileSync(profileHome(home, 'claude-work2') + '/.credentials.json', 'utf8')).toBe('{"claudeAiOauth":{}}');
+    if (process.platform === 'darwin') {
+      await expect(store.getSecret('claude', 'work2')).resolves.toBe('{"claudeAiOauth":{}}');
+    } else {
+      expect(fs.readFileSync(profileHome(home, 'claude-work2') + '/.credentials.json', 'utf8')).toBe('{"claudeAiOauth":{}}');
+    }
     // key/marker providers with no native CLI home use a plain 'credential' file
     expect(fs.readFileSync(profileHome(home, 'zai-key1') + '/credential', 'utf8')).toBe('sk-zai');
   });

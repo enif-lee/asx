@@ -1,9 +1,9 @@
 import fs from 'node:fs';
 import path from 'node:path';
-import { getClaudeConfigDir, getCodexHome, getGrokHome } from '../utils/platform.js';
+import { getHomeDotDir } from '../utils/platform.js';
 
-// Categories a profile can independently share from / isolate against the user's
-// default provider home. A profile stores the subset it shares (see account-store
+// Categories an isolated agent profile can independently share from / isolate
+// against the user's system provider home. A profile stores the subset it shares (see account-store
 // `share`): undefined => all categories, [] => fully isolated.
 export const SHARE_CATEGORIES = ['sessions', 'skills', 'agents', 'hooks', 'commands', 'settings'] as const;
 export type ShareCategory = (typeof SHARE_CATEGORIES)[number];
@@ -65,9 +65,9 @@ function providerKey(provider: string): string {
 
 function defaultHomeFor(provider: string): string | null {
   switch (providerKey(provider)) {
-    case 'claude': return getClaudeConfigDir();
-    case 'codex': return getCodexHome();
-    case 'grok': return getGrokHome();
+    case 'claude': return getHomeDotDir('claude');
+    case 'codex': return getHomeDotDir('codex');
+    case 'grok': return getHomeDotDir('grok');
     default: return null;
   }
 }
@@ -82,7 +82,7 @@ export function parseCategories(csv: string): ShareCategory[] {
   return [...new Set(parts)] as ShareCategory[];
 }
 
-// Symlink shared session/history/settings state from the provider's default home
+// Symlink shared session/history/settings state from the provider's system home
 // into an isolated profile (or cross-provider agent) home. `categories` limits which
 // categories are shared: undefined => all, [] => none (fully isolated). Best-effort:
 // any failure is ignored so an odd/missing default home never blocks execution.
