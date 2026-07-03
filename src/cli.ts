@@ -238,10 +238,7 @@ program
           } catch {}
         }
 
-        // Only annotate non-default sharing (default = share all -> no tag).
-        const sharePart = a.share === undefined ? ''
-          : a.share.length === 0 ? chalk.yellow(' [isolated]')
-          : chalk.yellow(` [shares: ${a.share.join(',')}]`);
+        const sharePart = chalk.yellow(` [${describeShare(a.share)}]`);
 
         console.log(`${star} ${a.name}${emailPart}${labelPart}${systemMark}${sharePart}`);
 

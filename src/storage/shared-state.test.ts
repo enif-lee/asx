@@ -132,8 +132,8 @@ describe('parseCategories / describeShare', () => {
   });
 
   it('describes the share value', () => {
-    expect(describeShare(undefined)).toBe('shared (all)');
-    expect(describeShare([])).toBe('isolated');
-    expect(describeShare(['sessions', 'skills'])).toMatch(/^shared: sessions,skills \(isolated: /);
+    expect(describeShare(undefined)).toBe('shared: sessions, skills, agents, hooks, commands, settings');
+    expect(describeShare([])).toBe('isolated: sessions, skills, agents, hooks, commands, settings');
+    expect(describeShare(['sessions', 'skills'])).toBe('shared: sessions, skills (isolated: agents, hooks, commands, settings)');
   });
 });

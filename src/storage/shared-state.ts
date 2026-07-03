@@ -120,8 +120,8 @@ export function linkSharedState(
 
 // Human-readable summary of a profile's `share` value for `list` / `sharing`.
 export function describeShare(share: string[] | undefined): string {
-  if (share === undefined) return 'shared (all)';
-  if (share.length === 0) return 'isolated';
+  if (share === undefined) return `shared: ${SHARE_CATEGORIES.join(', ')}`;
+  if (share.length === 0) return `isolated: ${SHARE_CATEGORIES.join(', ')}`;
   const isolated = SHARE_CATEGORIES.filter((c) => !share.includes(c));
-  return `shared: ${share.join(',')}${isolated.length ? ` (isolated: ${isolated.join(',')})` : ''}`;
+  return `shared: ${share.join(', ')}${isolated.length ? ` (isolated: ${isolated.join(', ')})` : ''}`;
 }

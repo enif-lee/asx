@@ -86,7 +86,7 @@ asx e personal.zai codex "use ZAI through Codex UI"
 
 | Command                  | Description |
 |--------------------------|-------------|
-| `asx list [provider] [-u/-d]` | List accounts. `-u/--usage` shows live quota bars. `-d/--debug` dumps stored credentials. Marks the live system credential with `(current in system)`. |
+| `asx list [provider] [-u/-d]` | List accounts and each profile's shared/isolated categories. `-u/--usage` shows live quota bars. `-d/--debug` dumps stored credentials. Marks the live system credential with `(current in system)`. |
 | `asx load [provider] [name] [share flags]` | Snapshot the currently active credential(s) from the provider into asx. Auto-generates name like `ed.claude` / `ed.codex` if omitted. Accepts the sharing flags below. |
 | `asx login <provider> [name] [--long-lived] [share flags]` | Login and store a new account. Claude defaults to native access/refresh tokens in the profile `CLAUDE_CONFIG_DIR`; Grok runs native `grok login`; ZAI asks for an API key and tests the endpoint; `--long-lived` uses `claude setup-token`. Accepts the sharing flags below. |
 | `asx sharing <name> [share flags]` | Show or change what a profile shares from the provider's default home. With no flags, prints the current setting. |
