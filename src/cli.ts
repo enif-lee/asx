@@ -752,8 +752,9 @@ program
     // When provider omitted: both follow the profile's provider.
     const { normalizeProvider, isKnownProvider } = await import('./providers/index.js');
     const argv = process.argv;
-    const subIdx = argv.findIndex((v, i) => (v === 'exec' || v === 'e') && argv[i + 1] === name);
-    const forwardStart = subIdx >= 0 ? subIdx + 2 : argv.length;
+    const subIdx = argv.findIndex((v) => v === 'exec' || v === 'e');
+    const nameIdx = subIdx >= 0 ? argv.indexOf(name, subIdx + 1) : -1;
+    const forwardStart = nameIdx >= 0 ? nameIdx + 1 : argv.length;
     let rawAfter = argv.slice(forwardStart).filter((a): a is string => typeof a === 'string');
 
     let specifiedProvider: string | undefined;
