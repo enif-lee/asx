@@ -198,12 +198,15 @@ describe('claude agent tools', () => {
   it('emits a tool_use block and stop_reason=tool_use', () => {
     const out = stream(claudeAgent, [CALL, { type: 'done' }]);
     const objs = sseObjects(out);
+    const startMsg = objs.find((o) => o.type === 'message_start');
+    expect(startMsg.message.usage).toMatchObject({ input_tokens: 0, output_tokens: 0 });
     const start = objs.find((o) => o.type === 'content_block_start' && o.content_block?.type === 'tool_use');
     expect(start.content_block).toMatchObject({ type: 'tool_use', id: 'call_1', name: 'get_weather' });
     const jsonDelta = objs.find((o) => o.type === 'content_block_delta' && o.delta?.type === 'input_json_delta');
     expect(jsonDelta.delta.partial_json).toBe('{"city":"seoul"}');
     const md = objs.find((o) => o.type === 'message_delta');
     expect(md.delta.stop_reason).toBe('tool_use');
+    expect(md.usage).toEqual({ output_tokens: 0 });
   });
 });
 

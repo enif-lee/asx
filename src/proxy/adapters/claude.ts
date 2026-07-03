@@ -12,6 +12,8 @@ import type { AgentAdapter, BackendAdapter, CommonRequest, CommonEvent, CommonRe
 import { resolveChoice } from '../models.js';
 import { sseEvent as anthEvent, sseHeaders, toText } from './util.js';
 
+const ZERO_USAGE = { input_tokens: 0, cache_creation_input_tokens: 0, cache_read_input_tokens: 0, output_tokens: 0 };
+
 // Anthropic messages (blocks incl. tool_use/tool_result) -> COMMON, keeping tool sessions intact.
 function anthMessagesToCommon(messages: any[]): CommonMessage[] {
   const out: CommonMessage[] = [];
@@ -71,7 +73,7 @@ export const claudeAgent: AgentAdapter = {
     let out = '';
     if (ctx.first) {
       ctx.first = false;
-      out += anthEvent('message_start', { type: 'message_start', message: { id: ctx.id, type: 'message', role: 'assistant', model: ctx.model, content: [], stop_reason: null } });
+      out += anthEvent('message_start', { type: 'message_start', message: { id: ctx.id, type: 'message', role: 'assistant', model: ctx.model, content: [], stop_reason: null, usage: ZERO_USAGE } });
     }
     const openText = (): string => {
       if (ctx.textOpen) return '';
@@ -103,7 +105,7 @@ export const claudeAgent: AgentAdapter = {
     out += closeText();
     const stopReason = ctx.items!.length ? 'tool_use' : 'end_turn';
     return out
-      + anthEvent('message_delta', { type: 'message_delta', delta: { stop_reason: stopReason } })
+      + anthEvent('message_delta', { type: 'message_delta', delta: { stop_reason: stopReason }, usage: { output_tokens: 0 } })
       + anthEvent('message_stop', { type: 'message_stop' });
   },
   formatResponse(resp: CommonResponse, _req: CommonRequest) {
@@ -115,7 +117,7 @@ export const claudeAgent: AgentAdapter = {
       content.push({ type: 'tool_use', id: tc.id, name: tc.name, input });
     }
     if (!content.length) content.push({ type: 'text', text: '' });
-    return { id: 'msg_asx', type: 'message', role: 'assistant', content, stop_reason: (resp.toolCalls || []).length ? 'tool_use' : 'end_turn' };
+    return { id: 'msg_asx', type: 'message', role: 'assistant', content, stop_reason: (resp.toolCalls || []).length ? 'tool_use' : 'end_turn', usage: ZERO_USAGE };
   },
   // Anthropic GET /v1/models shape. Claude Code only queries this when
   // CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY=1 (set by the proxy injector); the returned
