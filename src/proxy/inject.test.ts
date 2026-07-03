@@ -14,6 +14,12 @@ describe('injectProxyEndpoint', () => {
       const config = fs.readFileSync(path.join(tmp, 'codex', 'config.toml'), 'utf8');
       expect(config).toContain('model = "glm-5.2"');
       expect(config).toContain('model_provider = "asx-proxy"');
+      expect(config).toContain('model_catalog_json = ');
+      expect(config).toContain('env_key = "ASX_PROXY_API_KEY"');
+      expect(config).toContain('requires_openai_auth = false');
+      const catalog = JSON.parse(fs.readFileSync(path.join(tmp, 'codex', 'models.json'), 'utf8'));
+      expect(catalog.models[0]).toMatchObject({ slug: 'glm-5.2', display_name: 'glm-5.2', provider: 'asx-proxy', hidden: false });
+      expect(env.ASX_PROXY_API_KEY).toBe('asx-proxy-dummy');
     } finally {
       fs.rmSync(tmp, { recursive: true, force: true });
     }

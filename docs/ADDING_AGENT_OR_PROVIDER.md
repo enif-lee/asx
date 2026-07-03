@@ -6,12 +6,12 @@ ASX has three separate concerns:
 
 ```mermaid
 flowchart LR
-  Vault["Vault provider<br/>credential/profile"]
+  Profile["Profile home<br/>credential/profile"]
   Agent["Native agent<br/>CLI process"]
   Backend["Backend provider<br/>upstream API"]
   Proxy["ASX Proxy<br/>wire conversion"]
 
-  Vault --> Agent
+  Profile --> Agent
   Agent -- "same wire" --> Backend
   Agent -- "different wire" --> Proxy --> Backend
 ```
@@ -53,7 +53,7 @@ Adapter responsibilities:
 | `isExpired()` / `refresh()` | Stored credentials expire and can be refreshed safely. |
 | `clearCurrent()` | `asx login` needs to temporarily remove local native state before native login. |
 
-## Vault Rules
+## Profile Home Rules
 
 Use `src/storage/secure-store.ts` for credentials:
 
@@ -64,15 +64,15 @@ const rawCredential = await getSecret(provider, name);
 
 Rules:
 
-- The ASX vault is the source of truth for stored profile credentials.
-- The vault stores only raw credential material under `${provider}:${name}`.
-- Account metadata belongs in `src/storage/account-store.ts`, not in the vault.
-- Platform keychain is primary; the file vault is fallback only.
-- Do not add provider-specific vault files.
+- Each profile's home directory is the source of truth for its stored credential.
+- `setSecret`/`getSecret` read/write a `0600` file inside the profile home (`<asx config>/profiles/<provider>-<name>/`), named to match the provider's native auth file so the same directory can be handed to the native CLI via its home env var.
+- `asx load` creates system profiles that use the provider's normal user-level home at runtime; `asx login` creates isolated profiles unless the target profile is already current in system.
+- Account metadata belongs in `src/storage/account-store.ts`, not with the credential.
+- Prefer plain `0600` files under the asx config dir. Use provider-native secure storage only when the provider itself does so, such as Claude on macOS Keychain.
 - Do not store secrets in README, config samples, tests, or logs.
 - Preserve the provider's native credential shape when snapshotting. If the native file is a JSON wrapper, store the wrapper unless there is a clear reason to extract one field.
 
-`switchTo()` may mutate provider-native state. `exec` should prefer isolated runtime state so other terminals are not affected.
+`switchTo()` may mutate provider-native state. `exec` should prefer the profile or scratch home so other terminals are not affected.
 
 ## Native Agent Configuration
 
@@ -95,12 +95,12 @@ Checklist:
 
 - Use the native CLI's real config/home environment variable.
 - Seed only the files required to make the agent start.
-- Keep generated runtime files inside ASX's temp or stable runtime directory.
+- Keep generated runtime files inside the profile home or ASX scratch home under the profiles directory.
 - Add bypass flags only if the native CLI already supports them.
 - Add config injection in `src/proxy/inject.ts` when this agent can be routed through ASX Proxy.
 - Add an injection test in `src/proxy/inject.test.ts`.
 
-Prefer isolated execution over editing the user's global native config. Use stable profile-scoped runtime directories only when the provider's own refresh/session flow expects a consistent config path.
+Prefer profile or scratch homes over editing the user's global native config. Use the provider's real home env var when the provider's own refresh/session flow expects a consistent config path.
 
 ## Proxy Adapter
 
@@ -181,7 +181,7 @@ Minimum tests by change type:
 | Change | Test file |
 |---|---|
 | Provider credential flow | `src/providers/*.test.ts` |
-| Vault behavior | `src/storage/secure-store.test.ts` |
+| Profile-home storage behavior | `src/storage/secure-store.test.ts` |
 | Proxy adapter | `src/proxy/adapters/adapters.test.ts` |
 | Proxy routing/models | `src/proxy/server.test.ts` |
 | Config injection | `src/proxy/inject.test.ts` |
@@ -198,7 +198,7 @@ npm run build
 
 - Provider is registered.
 - Native agent target is normalized if users can type it.
-- Vault stores credentials through `secure-store.ts`.
+- Profile credentials are stored through `secure-store.ts`.
 - Native config writes are isolated unless the command is `switch`.
 - Proxy adapter is registered for each supported role: agent, backend, or both.
 - Model choices appear through `/models` and `/v1/models`.

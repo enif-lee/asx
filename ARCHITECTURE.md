@@ -7,13 +7,13 @@ The core path is:
 ```mermaid
 flowchart LR
   Native["Provider native auth<br/>or API key"]
-  Vault["ASX vault profile"]
-  Runtime["Isolated agent runtime"]
+  ProfileHome["ASX profile home<br/>0600 native auth file"]
+  AgentHome["Agent home env<br/>profile or scratch home"]
   Proxy{"Agent wire differs<br/>from backend provider?"}
   Direct["Provider upstream"]
   AsxProxy["ASX Proxy"]
 
-  Native --> Vault --> Runtime --> Proxy
+  Native --> ProfileHome --> AgentHome --> Proxy
   Proxy -- "No" --> Direct
   Proxy -- "Yes" --> AsxProxy --> Direct
 ```
@@ -26,7 +26,7 @@ Provider
 
 Profile
   One named ASX account under a provider.
-  Stored as: provider + name + credential + metadata.
+  Stored as: provider + name + profile home credential + metadata.
 
 Agent
   The native CLI process ASX launches, such as codex, claude, or grok.
@@ -82,8 +82,9 @@ Main commands:
 
 - `load`: snapshot the current native provider credential into ASX.
 - `login`: run a provider login flow and store the result.
+- `sharing`: show or change which default-home state a profile symlinks.
 - `switch`: write a stored credential back to the provider's native location.
-- `exec` / `e`: run an agent with an isolated profile.
+- `exec` / `e`: run an agent with a profile-scoped home.
 - `proxy`: expose a standalone ASX Proxy endpoint.
 
 The CLI does orchestration only. Provider-specific credential rules live in provider adapters.
@@ -92,62 +93,93 @@ The CLI does orchestration only. Provider-specific credential rules live in prov
 
 ASX keeps secrets and metadata separate.
 
-- `src/storage/secure-store.ts` stores credentials by `${provider}:${name}`.
-- `src/storage/account-store.ts` stores account metadata, labels, email, and active markers.
+- `src/storage/profile-home.ts` maps isolated `(provider, name)` profiles to a stable profile home and native auth filename.
+- `src/storage/secure-store.ts` stores credentials as `0600` files, except Claude on macOS where the profile-specific Keychain service is the source of truth.
+- `src/storage/account-store.ts` stores account metadata, labels, email, profile type, and active markers.
+- `src/storage/shared-state.ts` symlinks selected history/settings state from the provider's system home into an isolated profile or scratch home.
+
+The full on-disk profile structure:
 
 ```mermaid
 flowchart TD
-  Config["ASX config dir"]
-  Accounts["accounts.json<br/>provider, name, label, email, addedAt"]
+  Config["ASX config dir<br/>macOS: ~/Library/Application Support/asx"]
+  Accounts["accounts.json<br/>provider, name, label, email, profileType, share, addedAt"]
   Active[".active.json<br/>provider -> active profile name"]
-  SecureStore["secure-store.ts"]
-  Keychain["platform keychain<br/>service=asx, account=vault"]
-  VaultFile["fallback vault.json<br/>provider:name -> raw credential"]
+  Profiles["profiles/"]
+
+  subgraph IsolatedHome["isolated profile home: profiles/&lt;provider&gt;-&lt;name&gt;/ (0700)"]
+    Credential["native auth file<br/>0600 credential (auth.json / .credentials.json)"]
+    SharedLinks["shared categories per profile `share`<br/>sessions, skills, settings, ...<br/>symlinks into the provider system home"]
+  end
+
+  SystemHome["provider system home<br/>~/.claude ~/.codex ~/.grok<br/>(system profiles run here directly)"]
+  Keychain["Claude macOS exception<br/>Keychain: Claude Code-credentials-&lt;sha256(home)[:8]&gt;"]
+
+  subgraph AgentsDir["profiles/.agents/ (non-profile agent homes)"]
+    Scratch["&lt;provider&gt;-&lt;name&gt;/<br/>standalone `asx proxy` scratch home"]
+    RunHome["sessions/&lt;provider&gt;-&lt;name&gt;-&lt;runId&gt;/<br/>per-run cross-provider context home<br/>removed on exit unless --keep-context"]
+  end
 
   Config --> Accounts
   Config --> Active
-  SecureStore --> Keychain
-  SecureStore -. "fallback only when unavailable" .-> VaultFile
+  Config --> Profiles
+  Profiles --> IsolatedHome
+  Profiles --> AgentsDir
+  Accounts -- "profileType: system" --> SystemHome
+  Accounts -- "profileType: isolated" --> IsolatedHome
+  Credential -. "claude on macOS lives in" .-> Keychain
+  SharedLinks -. "symlink" .-> SystemHome
 ```
 
-The credential vault is the platform keychain by default:
+Credential files are named like the native CLI expects:
 
 ```text
-service=asx
-account=vault
+claude -> .credentials.json
+codex  -> auth.json
+grok   -> auth.json
+other  -> credential
 ```
 
-A `0600` file vault is only used when keychain storage is unavailable:
+Profile homes live under the platform ASX config directory:
 
 ```text
-<platform config dir>/asx/vault.json
+macOS:   ~/Library/Application Support/asx/profiles/
+Linux:   ~/.config/asx/profiles/
+Windows: %APPDATA%/asx/profiles/
 ```
 
-### Vault vs Provider-Native State
+There is no `vault.json`, migration layer, or `/tmp` credential copy in the current storage model. Claude on macOS is the exception to file storage: ASX uses Claude Code's profile-specific Keychain service.
 
-The ASX vault stores profile credentials. Provider-native state is what the original tool reads when it runs normally.
+### System Profiles vs Isolated Profiles
+
+ASX has two profile types:
+
+- **system profile**: registered by `asx load`; uses the provider's normal user-level home path.
+- **isolated profile**: created by `asx login`; uses an ASX-owned profile home.
+
+Provider-native state is what the original tool reads when it runs normally without ASX.
 
 ```mermaid
 flowchart TD
-  Vault["ASX vault<br/>platform keychain"]
+  ProfileHome["ASX isolated profile home<br/>native auth file or hashed Keychain key"]
 
   ClaudeNative["Claude native state<br/>macOS Keychain or .credentials.json"]
-  CodexNative["Codex native state<br/>CODEX_HOME/auth.json"]
-  GrokNative["Grok native state<br/>GROK_HOME/auth.json"]
+  CodexNative["Codex native state<br/>~/.codex/auth.json"]
+  GrokNative["Grok native state<br/>~/.grok/auth.json"]
   ZaiNative["ZAI<br/>no native agent state"]
 
-  Vault -- "switch claude" --> ClaudeNative
-  Vault -- "switch codex" --> CodexNative
-  Vault -- "switch grok" --> GrokNative
-  Vault -- "switch zai updates ASX marker/env only" --> ZaiNative
+  ProfileHome -- "switch claude" --> ClaudeNative
+  ProfileHome -- "switch codex" --> CodexNative
+  ProfileHome -- "switch grok" --> GrokNative
+  ProfileHome -- "switch zai updates ASX marker/env only" --> ZaiNative
 
-  ClaudeNative -- "load/login" --> Vault
-  CodexNative -- "load/login" --> Vault
-  GrokNative -- "load/login" --> Vault
-  ZaiNative -- "login API key" --> Vault
+  ClaudeNative -- "load registers system profile<br/>login creates isolated profile" --> ProfileHome
+  CodexNative -- "load registers system profile<br/>login creates isolated profile" --> ProfileHome
+  GrokNative -- "load registers system profile<br/>login creates isolated profile" --> ProfileHome
+  ZaiNative -- "login API key" --> ProfileHome
 ```
 
-`exec` usually avoids mutating provider-native state by copying the profile credential into an isolated runtime directory.
+`exec` avoids mutating provider-native state by setting the launched process's home env var to a profile or scratch home.
 
 ### Provider Adapters
 
@@ -175,23 +207,23 @@ Current provider mapping:
 
 ### Claude
 
-Claude native login is isolated by setting `CLAUDE_CONFIG_DIR` to a profile-scoped runtime directory before running `claude auth login`.
+Claude native login for isolated profiles sets `CLAUDE_CONFIG_DIR` to the profile home before running `claude auth login`. On macOS, Claude stores OAuth credentials in the Keychain service `Claude Code-credentials-<sha256(CLAUDE_CONFIG_DIR)[:8]>`; on Linux/Windows, it uses `.credentials.json`. If the target profile is current in system, ASX does not override `CLAUDE_CONFIG_DIR`.
 
-Normal Claude profiles store access/refresh credentials. Claude long-lived profiles store a wrapper containing `CLAUDE_CODE_OAUTH_TOKEN`; `exec` injects that value into the spawned process.
+Normal Claude profiles store access/refresh credentials in the provider-native store: macOS Keychain for Claude Code, `.credentials.json` on Linux/Windows. Claude long-lived profiles store a wrapper containing `CLAUDE_CODE_OAUTH_TOKEN`; `exec` injects that value into the spawned process.
 
-Native Claude credentials use a stable profile-scoped runtime directory so concurrent Claude sessions for the same ASX profile share Claude's own credential file.
+Profile homes are stable, so concurrent Claude sessions for the same ASX profile share Claude's own credential file.
 
 ### Codex
 
 Codex reads and writes `auth.json` under `CODEX_HOME`.
 
-ASX snapshots `CODEX_HOME/auth.json`, stores it in the vault, and writes it into an isolated `CODEX_HOME` during `exec` when isolation or proxy routing is needed.
+ASX snapshots the current `auth.json` into the profile home. During same-provider `exec`, `CODEX_HOME` points directly at that profile home, so refreshed tokens persist in place.
 
 ### Grok
 
 Grok native login runs `grok login`.
 
-ASX snapshots the full `auth.json` under `GROK_HOME` or `~/.grok`, preserving the issuer wrapper. `switch` writes the stored Grok auth back to `auth.json`.
+ASX snapshots the full `auth.json` under `GROK_HOME` or `~/.grok` into the profile home, preserving the issuer wrapper. `switch` writes the stored Grok auth back to `auth.json`.
 
 For usage and proxy calls, ASX extracts the bearer token from either the full Grok auth wrapper or a bare token.
 
@@ -203,7 +235,7 @@ ZAI has no native agent login in ASX. `asx login zai` asks for an API key, verif
 GET https://api.z.ai/api/coding/paas/v4/models
 ```
 
-Then it stores the key in the ASX vault.
+Then it stores the key in the profile home.
 
 `asx load zai` can also read `ZAI_API_KEY` or `ZAI_KEY` from the environment.
 
@@ -215,7 +247,7 @@ GET https://api.z.ai/api/monitor/usage/quota/limit
 
 ZAI `switch` cannot write to a native agent config because ASX does not manage a ZAI native agent. It updates ASX's active marker and exposes `ZAI_API_KEY` inside the current process.
 
-## Isolated Execution
+## Profile-Scoped Execution
 
 `asx exec <profile> [target?]` chooses two providers:
 
@@ -236,7 +268,7 @@ asx e personal.zai codex
   profile=zai, agent=codex, backend=zai
 ```
 
-Agent runtime isolation is controlled through provider home env vars:
+Agent home selection is controlled through provider home env vars:
 
 - Codex: `CODEX_HOME`
 - Claude: `CLAUDE_CONFIG_DIR`
@@ -244,40 +276,85 @@ Agent runtime isolation is controlled through provider home env vars:
 
 ### Same-Provider Execution
 
-When profile provider and agent provider are the same, ASX runs the native tool with that profile's credential.
+When profile provider and agent provider are the same, ASX runs system profiles on the provider's normal home path. Isolated profiles run with the profile home as the native home.
 
 ```mermaid
 flowchart TD
   Cmd["asx e personal.codex"]
-  Vault["ASX vault<br/>codex:personal.codex"]
-  Runtime["isolated CODEX_HOME<br/>auth.json"]
+  ProfileHome["ASX profile home<br/>codex-personal.codex/auth.json"]
+  Shared["optional symlinks<br/>sessions/settings/..."]
   Agent["codex CLI"]
   Upstream["Codex upstream"]
 
-  Cmd --> Vault --> Runtime --> Agent --> Upstream
+  Cmd --> ProfileHome
+  Shared --> ProfileHome
+  ProfileHome --> Agent --> Upstream
 ```
 
 No ASX Proxy is needed because the launched agent already speaks the backend provider's native wire format.
 
+### Profile Sharing / Isolation
+
+Shared-state symlinks are category-controlled for isolated agent profiles. The profile's
+`share` metadata (set at `asx login`, changed with `asx sharing`) selects categories:
+
+- unset `share`: share all categories.
+- `share: []`: share nothing.
+- `share: ["sessions", ...]`: share only those categories.
+
+Supported categories are provider-specific. Claude supports `sessions`, `skills`, `agents`, `hooks`, and `settings`; Codex and Grok support `sessions`, `skills`, and `settings`.
+
+`src/storage/shared-state.ts` owns the category → home-entry mapping:
+
+```text
+sessions  claude: projects/ sessions/ shell-snapshots/ file-history/ plans/ tasks/ todos/ history.jsonl
+          codex:  sessions/ archived_sessions/ history.jsonl session_index.jsonl
+          grok:   sessions/ projects/ active_sessions.json
+skills    all:    skills/
+agents    claude: agents/
+hooks     claude: hooks/
+settings  claude: plugins/ settings.json CLAUDE.md
+          codex:  rules/ plugins/ AGENTS.md config.toml
+          grok:   completions/ config.toml
+```
+
+Linking rules (`linkSharedState`):
+
+- Auth files and volatile runtime state (caches, logs, sqlite, tmp) are never in the map —
+  identity and scratch state stay per-profile unconditionally.
+- Shared directories are created in the system home if missing, so new history written
+  through the link lands in the shared home; missing shared *files* are simply skipped.
+- An existing real file/dir in the profile home is never clobbered by a symlink; only
+  stale symlinks are replaced.
+- On cross-provider runs `config.toml` is excluded even when `settings` is shared — the
+  proxy injection writes its own and must not overwrite the user's real config.
+- Everything is best-effort: a missing or odd system home never blocks execution.
+
+Cross-provider runs take the same selection per run via `-s`/`-i`/`--share`/`--isolate`
+(default: the agent provider's full category set), applied to the throwaway context home.
+
 ### Cross-Provider Execution
 
-When profile provider and agent provider differ, ASX starts a local proxy.
+When profile provider and agent provider differ, ASX starts a local proxy and launches the agent under a fresh per-run context home. The context can share the target agent's history/settings categories, but the real backend credential stays in the profile home and is only read by ASX Proxy. The context is removed on normal exit, error, SIGINT, or SIGTERM unless `--keep-context` or `ASX_KEEP_CONTEXT=1` is set.
 
 ```mermaid
 flowchart TD
   Cmd["asx e personal.zai codex"]
-  Vault["ASX vault<br/>zai:personal.zai"]
+  ProfileHome["ASX profile home<br/>zai-personal.zai/credential"]
   BackendCred["ASX Proxy backend credential"]
-  Config["isolated CODEX_HOME/config.toml<br/>base_url = http://127.0.0.1:port/v1<br/>model_provider = asx-proxy<br/>model = glm-5.2"]
+  Scratch["agent context home<br/>profiles/.agents/sessions/codex-personal.zai-run-id"]
+  Config["scratch CODEX_HOME/config.toml<br/>base_url = http://127.0.0.1:port/v1<br/>model_provider = asx-proxy<br/>model = glm-5.2"]
   Agent["codex CLI"]
   Proxy["ASX Proxy"]
   Upstream["ZAI upstream"]
 
-  Cmd --> Vault --> BackendCred --> Proxy
-  Cmd --> Config --> Agent
+  Cmd --> ProfileHome --> BackendCred --> Proxy
+  Cmd --> Scratch --> Config --> Agent
   Agent -- "Codex Responses wire" --> Proxy
   Proxy -- "ZAI OpenAI-compatible chat completions wire" --> Upstream
 ```
+
+Cross-provider exec consumes ASX options before forwarding agent args. `-s`/`--shared` shares all provider-supported categories; `-i`/`--isolated` shares none; `--share <categories>` and `--isolate <categories>` narrow the per-run context. Args after `--` are always forwarded to the agent.
 
 In this mode:
 
@@ -313,11 +390,29 @@ Files:
 
 - `src/proxy/server.ts`: local HTTP server and request routing.
 - `src/proxy/types.ts`: COMMON request, response, and adapter contracts.
-- `src/proxy/inject.ts`: writes temp config/env so native agents point at ASX Proxy.
+- `src/proxy/inject.ts`: writes scratch-home config/env so native agents point at ASX Proxy.
 - `src/proxy/models.ts`: backend model choices shown to the launched agent.
 - `src/proxy/adapters/*`: agent/backend wire adapters.
 
 `GET /models` and `GET /v1/models` return the backend model choices. This lets Codex and Grok display backend-specific model choices during cross-provider runs.
+
+### Agent Injection Details
+
+Each agent needs a different mechanism to (a) point at the proxy and (b) show backend
+models in its own picker:
+
+- **Codex**: a scratch `CODEX_HOME/config.toml` forces `model_provider = "asx-proxy"`
+  (`wire_api = "responses"`), plus a `models.json` catalog referenced by
+  `model_catalog_json`. Codex 0.142.x requires the full `ModelInfo` shape
+  (`slug`/`display_name`/`truncation_policy`/...) or its `/model` picker degrades.
+- **Claude**: `ANTHROPIC_BASE_URL` points at the proxy. Claude Code hardcodes its four
+  model slots (Opus/Sonnet/Haiku/Fable) and gateway discovery can only *append* to them,
+  so instead the backend models are remapped onto the built-in slots via
+  `ANTHROPIC_DEFAULT_<SLOT>_MODEL{,_NAME,_DESCRIPTION}` — the picker then shows only
+  backend models with real names. At most four backend models are shown.
+- **Grok**: a scratch `GROK_HOME/config.toml` with one `[model."<id>"]` entry per backend
+  model (grok appends `/chat/completions` to `base_url`), a dummy `api_key` so headless
+  `grok -p` skips login, and `permission_mode = "always-approve"`.
 
 ### Proxy Adapter Composition
 
@@ -348,6 +443,55 @@ flowchart LR
 ```
 
 `zai` is backend-only because ASX does not launch a native ZAI agent.
+
+### Codex Namespace Tools (Multi-Agent)
+
+Codex ships its multi-agent tools as a *namespace group* on the Responses wire, and dispatches
+replies on a `{name, namespace}` pair — not a flat name:
+
+```jsonc
+// request tool def (codex -> proxy)
+{ "type": "namespace", "name": "multi_agent_v1",
+  "tools": [ { "type": "function", "name": "spawn_agent", ... }, ... ] }
+
+// expected reply item (proxy -> codex)
+{ "type": "function_call", "name": "spawn_agent", "namespace": "multi_agent_v1", ... }
+```
+
+A flat `function_call` named `multi_agent_v1` fails codex's tool registry lookup with
+`unsupported call: multi_agent_v1`. Other backends only understand flat function tools
+(and Anthropic tool names forbid `.`), so the codex agent adapter:
+
+- flattens each namespace member to `${namespace}__${name}` in the COMMON tool defs and
+  records the namespace list on `CommonRequest.toolNamespaces` (threaded to `StreamCtx`);
+- re-flattens replayed namespaced `function_call` history items the same way, so a
+  multi-turn session matches the defs the backend saw;
+- splits flat names back into `{name, namespace}` on response items — but only under a
+  namespace the request actually declared, because MCP tool names legitimately contain `__`.
+
+### Backend Adapter Constraints
+
+- `claude`: extended thinking is force-disabled for cross-provider agents — they cannot
+  store Anthropic thinking blocks + signatures, and replaying a tool-use turn without them
+  is a hard 400. `temperature`/`top_p`/`top_k` are never sent (newer models reject them).
+  Auth is the OAuth Bearer token with the `claude-code` beta headers.
+- `codex`: speaks the ChatGPT `backend-api/codex/responses` contract (stream-only; the
+  server accumulates when the agent asked for non-stream).
+- `zai`: a 200 response whose body carries an overload code (e.g. `1305`) is treated as
+  retryable via `isRetryable`.
+
+### Proxy Robustness
+
+- Upstream calls retry transient failures (network errors, 408/429/5xx, provider
+  `isRetryable` body signals) with exponential backoff + jitter; auth/bad-request class
+  statuses (400/401/403/404/...) never retry.
+- Streaming tool-call fragments (`tool_call_delta`) are accumulated per index and emitted
+  as complete `tool_call` events at stream end, so agent adapters only frame whole calls.
+- Mid-stream upstream failures never surface as a 500: partial SSE may already be written,
+  so the proxy flushes accumulated tool calls, appends the error as SSE text, and closes
+  with a clean `done` event. Client disconnects cancel the upstream read.
+- OK upstream streams without an `event-stream` content type are passed through untouched
+  (only providers with body-level retry signals get a 200-body inspection).
 
 ## Adding a Provider
 

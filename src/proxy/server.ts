@@ -25,10 +25,12 @@ export async function startProxy(options: ProxyStartOptions): Promise<ProxyHandl
     const isModels = req.method === 'GET' && /\/(v1\/)?models\/?$/.test(urlPath);
     dlog(`[asx-proxy] ${req.method} ${urlPath} (agent=${agentProvider}->backend=${backendProvider}, id=${reqId}${isInference ? ', inference' : ''})`);
 
-    // Track whether the client (agent) has closed the connection so we can cancel
-    // the upstream stream instead of reading it into a dead socket.
+    // Track whether the client (agent) has closed the response early so we can
+    // cancel the upstream stream instead of reading it into a dead socket.
     let clientClosed = false;
-    req.on('close', () => { clientClosed = true; });
+    res.on('close', () => {
+      if (!res.writableEnded) clientClosed = true;
+    });
 
     try {
       if (isModels) {
@@ -63,7 +65,7 @@ export async function startProxy(options: ProxyStartOptions): Promise<ProxyHandl
       const { res: upstreamRes, errText } = await fetchUpstreamWithRetry(up, backend);
       dlog(`[asx-proxy] upstream ${up.url} -> ${upstreamRes.status}`);
 
-      const ctx: StreamCtx = { id: 'chatcmpl-asx-' + reqId, created: Math.floor(Date.now() / 1000), model: common.model, first: true };
+      const ctx: StreamCtx = { id: 'chatcmpl-asx-' + reqId, created: Math.floor(Date.now() / 1000), model: common.model, first: true, toolNamespaces: common.toolNamespaces };
 
       // errText is set only when the body was already read (an error / non-stream response) —
       // surface it to the agent's output (not a 500), and return. On the happy stream path
@@ -281,7 +283,9 @@ export async function fetchUpstreamWithRetry(
     lastRes = res;
     const ct = res.headers.get('content-type') || '';
     // Happy path: a streaming body — hand it back untouched so the caller can pipe it.
-    if (res.ok && ct.includes('event-stream')) return { res };
+    // Some upstreams stream SSE with a generic content-type; only providers with
+    // body-level retry signals need a 200 body inspection.
+    if (res.ok && (ct.includes('event-stream') || !backend?.isRetryable)) return { res };
     // Otherwise read the (small) body to inspect for an overload code / non-stream error.
     const text = await res.text().catch(() => '');
     lastText = text;

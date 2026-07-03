@@ -1,8 +1,10 @@
-import { execFileSync, execSync } from 'node:child_process';
+import { execFileSync } from 'node:child_process';
 import fs from 'node:fs';
+import path from 'node:path';
 import { setSecret, getSecret } from '../storage/secure-store.js';
 import { addAccount } from '../storage/account-store.js';
-import { getClaudeCredentialsPath, getPlatform, ensureDirFor } from '../utils/platform.js';
+import { getClaudeConfigDir, getClaudeCredentialsPath, getPlatform, ensureDirFor } from '../utils/platform.js';
+import { deleteClaudeKeychainCredential, getClaudeKeychainService, readClaudeKeychainCredential, writeClaudeKeychainCredential } from '../utils/claude-keychain.js';
 import type { ProviderAdapter } from './base.js';
 import { renderBar, formatReset } from '../utils/bar.js';
 
@@ -62,21 +64,24 @@ async function extractClaudeEmail(credJson: string): Promise<string | undefined>
 
 function readCurrentCredentials(): string | null {
   const filePath = getClaudeCredentialsPath();
-  if (process.env.CLAUDE_CONFIG_DIR && fs.existsSync(filePath)) {
-    try { return fs.readFileSync(filePath, 'utf8'); } catch { return null; }
-  }
-
   const plat = getPlatform();
   if (plat === 'darwin') {
+    if (process.env.CLAUDE_CONFIG_DIR) {
+      // Claude Code keys macOS credentials by SHA-256(CLAUDE_CONFIG_DIR)[:8].
+      // Do not fall back to the global Keychain when scoped.
+      const scoped = readClaudeKeychainCredential(getClaudeKeychainService(getClaudeConfigDir()));
+      if (scoped) return scoped;
+      if (fs.existsSync(filePath)) {
+        try { return fs.readFileSync(filePath, 'utf8'); } catch { return null; }
+      }
+      return null;
+    }
+
     // Preferred on macOS: the login Keychain.
-    const services = ['Claude Code-credentials', 'Claude Code - credentials', 'claude-code-credentials'];
+    const services = [getClaudeKeychainService(), 'Claude Code - credentials', 'claude-code-credentials'];
     for (const svc of services) {
-      try {
-        const out = execSync(`security find-generic-password -s ${JSON.stringify(svc)} -w`, {
-          encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore']
-        }).trim();
-        if (out) return out;
-      } catch {}
+      const out = readClaudeKeychainCredential(svc);
+      if (out) return out;
     }
     // Fallback: newer Claude Code builds (and sandboxed/keychain-less setups) keep the
     // credentials in ~/.claude/.credentials.json instead of the Keychain. Without this,
@@ -95,30 +100,22 @@ function readCurrentCredentials(): string | null {
   return null;
 }
 
+function readScopedAccountEmail(): string | undefined {
+  if (!process.env.CLAUDE_CONFIG_DIR) return undefined;
+  try {
+    const p = path.join(path.dirname(getClaudeCredentialsPath()), '.claude.json');
+    const data = JSON.parse(fs.readFileSync(p, 'utf8'));
+    return data?.oauthAccount?.emailAddress || data?.oauthAccount?.email || undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 function writeActiveCredentials(raw: string): void {
   const plat = getPlatform();
   if (plat === 'darwin') {
-    const account = process.env.USER || 'user';
-    // Write under the service claude actually reads
-    const svc = 'Claude Code-credentials';
-    let wroteKeychain = false;
-    try {
-      execSync(`security add-generic-password -s ${JSON.stringify(svc)} -a ${JSON.stringify(account)} -w ${JSON.stringify(raw)} -U`, { stdio: 'ignore' });
-      wroteKeychain = true;
-    } catch (e) {
-      console.error('Warning: failed to write Claude Keychain item directly');
-    }
-    // Mirror to the file-based store so `switch` actually takes effect for the builds that
-    // read ~/.claude/.credentials.json (see readCurrentCredentials). Also our only channel
-    // when the Keychain write failed.
-    const p = getClaudeCredentialsPath();
-    if (!wroteKeychain || fs.existsSync(p)) {
-      try {
-        ensureDirFor(p);
-        fs.writeFileSync(p, raw);
-        fs.chmodSync(p, 0o600);
-      } catch {}
-    }
+    const svc = getClaudeKeychainService(process.env.CLAUDE_CONFIG_DIR ? getClaudeConfigDir() : null);
+    writeClaudeKeychainCredential(svc, raw);
     return;
   }
 
@@ -192,6 +189,10 @@ export const claudeCodeAdapter: ProviderAdapter = {
       throw new Error('No active Claude Code credentials found. Login with `claude` (or `claude auth login`) first, then run `asx load claude <name>`.');
     }
     const email = await extractClaudeEmail(current);
+    const scopedEmail = readScopedAccountEmail();
+    if (email && scopedEmail && email.toLowerCase() !== scopedEmail.toLowerCase()) {
+      throw new Error(`Claude scoped login mismatch: profile home says ${scopedEmail}, but credential token belongs to ${email}. Refusing to save stale credentials.`);
+    }
     await setSecret(PROVIDER, accountName, current);
 
     addAccount({
@@ -230,12 +231,11 @@ export const claudeCodeAdapter: ProviderAdapter = {
   async clearCurrent() {
     const plat = getPlatform();
     if (plat === 'darwin') {
-      const account = process.env.USER || 'user';
-      const services = ['Claude Code-credentials', 'Claude Code - credentials', 'claude-code-credentials'];
+      const services = process.env.CLAUDE_CONFIG_DIR
+        ? [getClaudeKeychainService(getClaudeConfigDir())]
+        : [getClaudeKeychainService(), 'Claude Code - credentials', 'claude-code-credentials'];
       for (const svc of services) {
-        try {
-          execSync(`security delete-generic-password -s ${JSON.stringify(svc)} -a ${JSON.stringify(account)}`, { stdio: 'ignore' });
-        } catch {}
+        deleteClaudeKeychainCredential(svc);
       }
       return;
     }

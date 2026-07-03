@@ -9,6 +9,10 @@ const AccountSchema = z.object({
   label: z.string().optional(),
   email: z.string().optional(), // extracted from login info
   addedAt: z.string(),
+  // Which state categories this isolated profile shares from the provider's system home
+  // (see shared-state.ts). Absent => share all (default). [] => fully isolated.
+  share: z.array(z.string()).optional(),
+  profileType: z.enum(['system', 'isolated']).optional(),
   meta: z.record(z.string(), z.any()).optional(),
 });
 
@@ -78,6 +82,27 @@ function canonicalProvider(p: string): string {
 export function getAccount(provider: string, name: string): AccountRecord | undefined {
   const prov = canonicalProvider(provider);
   return loadStore().accounts.find(a => canonicalProvider(a.provider) === prov && a.name === name);
+}
+
+// Set which state categories a profile shares. `undefined` clears the field
+// (= share all, the default); `[]` means fully isolated; a list shares that subset.
+export function setShare(provider: string, name: string, share: string[] | undefined): void {
+  const prov = canonicalProvider(provider);
+  const store = loadStore();
+  const acc = store.accounts.find(a => canonicalProvider(a.provider) === prov && a.name === name);
+  if (!acc) throw new Error(`Account ${provider}/${name} not found`);
+  if (share === undefined) delete acc.share; else acc.share = share;
+  saveStore(store);
+}
+
+export function setProfileType(provider: string, name: string, profileType: 'system' | 'isolated'): void {
+  const prov = canonicalProvider(provider);
+  const store = loadStore();
+  const acc = store.accounts.find(a => canonicalProvider(a.provider) === prov && a.name === name);
+  if (!acc) throw new Error(`Account ${provider}/${name} not found`);
+  acc.profileType = profileType;
+  if (profileType === 'system') delete acc.share;
+  saveStore(store);
 }
 
 export function setActive(provider: string, name: string): void {

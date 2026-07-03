@@ -3,37 +3,26 @@ import os from 'node:os';
 import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
-const state = vi.hoisted(() => ({
-  keychainRaw: null as string | null,
-  lastSetAccount: null as string | null,
-  failGet: false,
-  failSet: false,
-}));
-
-vi.mock('node:module', async (importOriginal) => {
-  const actual = await importOriginal<typeof import('node:module')>();
-  return {
-    ...actual,
-    createRequire: vi.fn(() => (name: string) => {
-      if (name !== 'cross-keychain') return actual.createRequire(import.meta.url)(name);
-      return {
-        getPassword: vi.fn(async () => {
-          if (state.failGet) throw new Error('keychain read failed');
-          return state.keychainRaw;
-        }),
-        setPassword: vi.fn(async (_service: string, account: string, value: string) => {
-          if (state.failSet) throw new Error('keychain write failed');
-          state.lastSetAccount = account;
-          state.keychainRaw = value;
-        }),
-      };
-    }),
-  };
-});
+const keychain = vi.hoisted(() => new Map<string, string>());
 
 vi.mock('node:child_process', () => ({
-  execSync: vi.fn(() => {
-    throw new Error('native keychain unavailable');
+  execFileSync: vi.fn((cmd: string, args: string[]) => {
+    if (cmd !== 'security') return '';
+    const service = args[args.indexOf('-s') + 1];
+    if (args[0] === 'find-generic-password') {
+      const value = keychain.get(service);
+      if (!value) throw new Error('not found');
+      return value;
+    }
+    if (args[0] === 'add-generic-password') {
+      keychain.set(service, args[args.indexOf('-w') + 1]);
+      return '';
+    }
+    if (args[0] === 'delete-generic-password') {
+      keychain.delete(service);
+      return '';
+    }
+    return '';
   }),
 }));
 
@@ -42,8 +31,11 @@ function configDir(home: string): string {
   if (process.platform === 'darwin') return path.join(home, 'Library', 'Application Support', 'asx');
   return path.join(home, '.config', 'asx');
 }
+function profileHome(home: string, dirName: string): string {
+  return path.join(configDir(home), 'profiles', dirName);
+}
 
-describe('secure store vault backend', () => {
+describe('secure store (profile-home backend)', () => {
   let home: string;
   let prevHome: string | undefined;
   let prevAppData: string | undefined;
@@ -51,10 +43,7 @@ describe('secure store vault backend', () => {
 
   beforeEach(() => {
     vi.resetModules();
-    state.keychainRaw = null;
-    state.lastSetAccount = null;
-    state.failGet = false;
-    state.failSet = false;
+    keychain.clear();
     home = fs.mkdtempSync(path.join(os.tmpdir(), 'asx-secure-store-'));
     prevHome = process.env.HOME;
     prevAppData = process.env.APPDATA;
@@ -71,40 +60,57 @@ describe('secure store vault backend', () => {
     fs.rmSync(home, { recursive: true, force: true });
   });
 
-  it('stores credentials in keychain when keychain is available', async () => {
+  it('stores the credential in the profile home using the provider native filename', async () => {
     const store = await import('./secure-store.js');
 
-    await store.setSecret('zai', 'personal.zai', 'zai-key');
+    await store.setSecret('codex', 'work', 'codex-cred');
+    await store.setSecret('claude', 'work2', '{"claudeAiOauth":{}}');
+    await store.setSecret('zai', 'key1', 'sk-zai');
 
-    expect(state.lastSetAccount).toBe('vault');
-    expect(JSON.parse(state.keychainRaw!).accounts['zai:personal.zai'].credential).toBe('zai-key');
-    expect(fs.existsSync(path.join(configDir(home), 'vault.json'))).toBe(false);
+    expect(fs.readFileSync(profileHome(home, 'codex-work') + '/auth.json', 'utf8')).toBe('codex-cred');
+    if (process.platform === 'darwin') {
+      await expect(store.getSecret('claude', 'work2')).resolves.toBe('{"claudeAiOauth":{}}');
+    } else {
+      expect(fs.readFileSync(profileHome(home, 'claude-work2') + '/.credentials.json', 'utf8')).toBe('{"claudeAiOauth":{}}');
+    }
+    // key/marker providers with no native CLI home use a plain 'credential' file
+    expect(fs.readFileSync(profileHome(home, 'zai-key1') + '/credential', 'utf8')).toBe('sk-zai');
   });
 
-  it('falls back to the file vault when keychain write fails', async () => {
-    state.failGet = true;
-    state.failSet = true;
+  it('round-trips via getSecret and enforces 0600/0700 permissions', async () => {
     const store = await import('./secure-store.js');
+    await store.setSecret('codex', 'work', 'codex-cred');
 
-    await store.setSecret('zai', 'personal.zai', 'zai-key');
+    await expect(store.getSecret('codex', 'work')).resolves.toBe('codex-cred');
+    await expect(store.getSecret('codex', 'missing')).resolves.toBeNull();
 
-    const fileVault = JSON.parse(fs.readFileSync(path.join(configDir(home), 'vault.json'), 'utf8'));
-    expect(fileVault.accounts['zai:personal.zai'].credential).toBe('zai-key');
+    if (process.platform !== 'win32') {
+      expect(fs.statSync(profileHome(home, 'codex-work')).mode & 0o777).toBe(0o700);
+      expect(fs.statSync(profileHome(home, 'codex-work') + '/auth.json').mode & 0o777).toBe(0o600);
+    }
   });
 
-  it('reads the file vault only when keychain read fails', async () => {
-    state.failGet = true;
-    const file = path.join(configDir(home), 'vault.json');
-    fs.mkdirSync(path.dirname(file), { recursive: true });
-    fs.writeFileSync(file, JSON.stringify({
-      version: 1,
-      accounts: { 'zai:personal.zai': { credential: 'file-key', addedAt: '2026-01-01T00:00:00.000Z' } },
-    }));
-
+  it('deleteSecret removes the whole profile home', async () => {
     const store = await import('./secure-store.js');
+    await store.setSecret('codex', 'work', 'codex-cred');
+    expect(fs.existsSync(profileHome(home, 'codex-work'))).toBe(true);
 
-    await expect(store.getSecret('zai', 'personal.zai')).resolves.toBe('file-key');
-    expect(state.keychainRaw).toBeNull();
-    expect(fs.existsSync(file)).toBe(true);
+    await store.deleteSecret('codex', 'work');
+    expect(fs.existsSync(profileHome(home, 'codex-work'))).toBe(false);
+  });
+
+  it('renameSecret moves the profile home', async () => {
+    const store = await import('./secure-store.js');
+    await store.setSecret('codex', 'old', 'codex-cred');
+
+    await store.renameSecret('codex', 'old', 'new');
+
+    expect(fs.existsSync(profileHome(home, 'codex-old'))).toBe(false);
+    await expect(store.getSecret('codex', 'new')).resolves.toBe('codex-cred');
+  });
+
+  it('renameSecret throws when the source does not exist', async () => {
+    const store = await import('./secure-store.js');
+    await expect(store.renameSecret('codex', 'nope', 'other')).rejects.toThrow(/No secret found/);
   });
 });

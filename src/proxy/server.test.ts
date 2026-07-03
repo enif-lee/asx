@@ -95,9 +95,11 @@ describe('fetchUpstreamWithRetry', () => {
   it('does not retry a 200-with-1305 when the backend has no isRetryable hook', async () => {
     let n = 0;
     const fetchImpl = (async () => { n++; return overload200(); }) as any;
-    const { res } = await fetchUpstreamWithRetry(up, {}, { fetchImpl, sleep: noSleep });
+    const { res, errText } = await fetchUpstreamWithRetry(up, {}, { fetchImpl, sleep: noSleep });
     expect(n).toBe(1);
     expect(res.status).toBe(200);
+    expect(errText).toBeUndefined();
+    await expect(res.text()).resolves.toContain('1305');
   });
 
   it('does not retry a non-retryable 400', async () => {
@@ -130,6 +132,47 @@ describe('proxy metadata endpoints', () => {
       expect(body.data[0].type).toBe('model');
     } finally {
       claude.stop();
+    }
+  });
+});
+
+describe('proxy streaming endpoints', () => {
+  it('keeps reading a codex->claude stream until response.completed', async () => {
+    const nativeFetch = globalThis.fetch.bind(globalThis);
+    const anthropicSse = [
+      'event: message_start\ndata: {"type":"message_start","message":{"id":"msg_1","type":"message","role":"assistant","content":[]}}\n\n',
+      'event: content_block_start\ndata: {"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}\n\n',
+      'event: content_block_delta\ndata: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"hello"}}\n\n',
+      'event: content_block_stop\ndata: {"type":"content_block_stop","index":0}\n\n',
+      'event: message_stop\ndata: {"type":"message_stop"}\n\n',
+    ].join('');
+    const originalFetch = globalThis.fetch;
+    (globalThis as any).fetch = async () => new Response(anthropicSse, {
+      status: 200,
+      headers: { 'content-type': 'text/event-stream' },
+    });
+    const proxy = await startProxy({
+      sourceProvider: 'codex',
+      targetProvider: 'claude',
+      targetCredential: { raw: 'claude-token' },
+    });
+    try {
+      const res = await nativeFetch(`${proxy.url}/v1/responses`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({
+          model: 'claude-opus-4-8',
+          input: [{ type: 'message', role: 'user', content: [{ type: 'input_text', text: 'hi' }] }],
+          stream: true,
+        }),
+      });
+      const text = await res.text();
+      expect(res.status).toBe(200);
+      expect(text).toContain('hello');
+      expect(text).toContain('response.completed');
+    } finally {
+      proxy.stop();
+      globalThis.fetch = originalFetch;
     }
   });
 });
