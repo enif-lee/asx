@@ -2,7 +2,17 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { dlog } from '../utils/log.js';
 import { backendChoices } from './models.js';
-import { getAsxTmpBase } from '../utils/platform.js';
+import { getAsxProfilesDir } from '../utils/platform.js';
+
+// Last-resort scratch home for the injected native config when the caller did not
+// provide a home. Both real callers (exec, `asx proxy`) always pass one, so this is
+// a defensive fallback kept under the asx config dir (never /tmp).
+function fallbackAgentHome(provider: string): string {
+  const dir = path.join(getAsxProfilesDir(), '.agents', `${provider}-adhoc`);
+  fs.mkdirSync(dir, { recursive: true });
+  try { fs.chmodSync(dir, 0o700); } catch {}
+  return dir;
+}
 
 // Inject proxy endpoint into the isolated temp environment so the *native binary*
 // (codex or claude) talks to our local ASX proxy instead of real provider.
@@ -34,10 +44,7 @@ async function injectCodexProxy(tmpDir: string | undefined, proxyBaseUrl: string
     codexHome = path.join(tmpDir, 'codex');
   }
   if (!codexHome) {
-    // Last resort: use a temp dir just for this injection
-    const fs = await import('node:fs');
-    const temp = fs.mkdtempSync(path.join(getAsxTmpBase(), 'asx-codex-proxy-'));
-    codexHome = path.join(temp, 'codex');
+    codexHome = fallbackAgentHome('codex');
     env.CODEX_HOME = codexHome;
   }
 
@@ -112,9 +119,7 @@ async function injectGrokProxy(tmpDir: string | undefined, proxyBaseUrl: string,
     grokHome = path.join(tmpDir, 'grok');
   }
   if (!grokHome) {
-    const fsMod = await import('node:fs');
-    const temp = fsMod.mkdtempSync(path.join(getAsxTmpBase(), 'asx-grok-proxy-'));
-    grokHome = path.join(temp, 'grok');
+    grokHome = fallbackAgentHome('grok');
     env.GROK_HOME = grokHome;
   }
 

@@ -3,14 +3,15 @@ import { Command } from 'commander';
 import chalk from 'chalk';
 import { spawn, type SpawnOptions } from 'node:child_process';
 import fs from 'node:fs';
-import os from 'node:os';
 import path from 'node:path';
 import { getAdapter, listKnownProviders } from './providers/index.js';
 import * as provIndex from './providers/index.js';
 import { getClaudeCodeOAuthToken, isClaudeCodeLongLivedToken } from './providers/claude-code.js';
-import { getAsxTmpBase } from './utils/platform.js';
-import { listAccounts, getActive, getAccountByName } from './storage/account-store.js';
-import { getSecret, setSecret } from './storage/secure-store.js';
+import { getAsxProfilesDir } from './utils/platform.js';
+import { listAccounts, getActive, getAccountByName, getAccount, setShare } from './storage/account-store.js';
+import { getSecret } from './storage/secure-store.js';
+import { getProfileHome, safeProfileDirName } from './storage/profile-home.js';
+import { linkSharedState, parseCategories, describeShare, SHARE_CATEGORIES } from './storage/shared-state.js';
 import { dlog } from './utils/log.js';
 
 function getProviderShortName(provider: string): string {
@@ -46,11 +47,11 @@ function fakeCodexAuth(): string {
 // Per-agent facts: native binary, the env var + temp subdir + auth file used to isolate it,
 // full-access bypass flags, and the boot stub written when running under a *cross* profile
 // (so the binary skips its own login). stub=null → no file needed (grok routes via config.toml).
-interface AgentSpec { bin: string; homeEnv: string; sub: string; file: string; bypass: string[]; stub: (() => string) | null; }
+interface AgentSpec { bin: string; homeEnv: string; file: string; bypass: string[]; stub: (() => string) | null; }
 const AGENT_SPEC: Record<string, AgentSpec> = {
-  codex: { bin: 'codex', homeEnv: 'CODEX_HOME', sub: 'codex', file: 'auth.json', bypass: ['--dangerously-bypass-approvals-and-sandbox', '--dangerously-bypass-hook-trust'], stub: fakeCodexAuth },
-  claude: { bin: 'claude', homeEnv: 'CLAUDE_CONFIG_DIR', sub: 'claude', file: '.credentials.json', bypass: ['--dangerously-skip-permissions'], stub: () => JSON.stringify({ claudeAiOauth: { accessToken: 'asx-proxy-dummy' } }) },
-  grok: { bin: 'grok', homeEnv: 'GROK_HOME', sub: 'grok', file: 'auth.json', bypass: ['--dangerously-skip-permissions'], stub: null },
+  codex: { bin: 'codex', homeEnv: 'CODEX_HOME', file: 'auth.json', bypass: ['--dangerously-bypass-approvals-and-sandbox', '--dangerously-bypass-hook-trust'], stub: fakeCodexAuth },
+  claude: { bin: 'claude', homeEnv: 'CLAUDE_CONFIG_DIR', file: '.credentials.json', bypass: ['--dangerously-skip-permissions'], stub: () => JSON.stringify({ claudeAiOauth: { accessToken: 'asx-proxy-dummy' } }) },
+  grok: { bin: 'grok', homeEnv: 'GROK_HOME', file: 'auth.json', bypass: ['--dangerously-skip-permissions'], stub: null },
 };
 const agentSpec = (provider: string): AgentSpec | undefined => AGENT_SPEC[provider.includes('claude') ? 'claude' : provider];
 
@@ -73,16 +74,18 @@ function seedAgentHome(provider: string, dir: string) {
   fs.writeFileSync(p, JSON.stringify({ ...current, hasCompletedOnboarding: true }), { mode: 0o600 });
 }
 
-function stableAgentHome(provider: string, accountName: string, sub: string): string {
-  const uid = typeof process.getuid === 'function' ? process.getuid() : 'user';
-  const homeScope = Buffer.from(os.homedir()).toString('base64url').slice(0, 16) || 'home';
-  const safeName = `${provider}-${accountName}`.replace(/[^a-zA-Z0-9_.-]/g, '_');
-  const root = path.join(getAsxTmpBase(), `asx-${uid}-${homeScope}-runtime`);
-  const dir = path.join(root, safeName, sub);
+function ensureHome700(dir: string): void {
   fs.mkdirSync(dir, { recursive: true });
-  for (const p of [root, path.dirname(dir), dir]) {
-    try { fs.chmodSync(p, 0o700); } catch {}
-  }
+  try { fs.chmodSync(dir, 0o700); } catch {}
+}
+
+// In cross-provider exec the launched agent binary is NOT the profile's provider,
+// so it must run under its own home holding a dummy stub credential — kept separate
+// from the profile home, which holds the real backend credential (the SSOT).
+function agentScratchHome(agentProvider: string, accountName: string): string {
+  const dir = path.join(getAsxProfilesDir(), '.agents', safeProfileDirName(agentProvider, accountName));
+  ensureHome700(path.dirname(dir));
+  ensureHome700(dir);
   return dir;
 }
 
@@ -128,11 +131,35 @@ function resolveProviderName(a?: string, b?: string): { provider?: string; name?
 function normalizeProviderSync(p: string): string | undefined { return provIndex.normalizeProvider(p); }
 function isKnownProviderSync(p: string): boolean { return provIndex.isKnownProvider(p); }
 
+// Attach shared/isolation flags to a command (login, load, sharing) uniformly.
+function withShareFlags(cmd: Command): Command {
+  return cmd
+    .option('--isolated', 'Fully isolate this profile (share nothing from the default provider home)')
+    .option('--shared', 'Share all state (session history, skills, agents, hooks, commands, settings) — the default')
+    .option('--share <categories>', `Share only these comma-separated categories (${SHARE_CATEGORIES.join(', ')})`)
+    .option('--isolate <categories>', 'Share everything except these comma-separated categories');
+}
+
+interface ShareOpts { isolated?: boolean; shared?: boolean; share?: string; isolate?: string }
+// Resolve share flags into the value to persist. Returns { provided:false } when no
+// flag was passed (leave the profile's setting untouched). `value` follows the store
+// convention: undefined => share all, [] => isolated, [...] => that subset.
+function resolveShareFlags(o: ShareOpts): { provided: boolean; value?: string[] } {
+  const set = [o.isolated, o.shared, o.share, o.isolate].filter((x) => x !== undefined);
+  if (set.length === 0) return { provided: false };
+  if (set.length > 1) throw new Error('Use only one of --isolated / --shared / --share / --isolate.');
+  if (o.isolated) return { provided: true, value: [] };
+  if (o.shared) return { provided: true, value: undefined };
+  if (o.share !== undefined) return { provided: true, value: parseCategories(o.share) };
+  const exclude = parseCategories(o.isolate!);
+  return { provided: true, value: SHARE_CATEGORIES.filter((c) => !exclude.includes(c)) };
+}
+
 const program = new Command();
 
 program
   .name('asx')
-  .description('Multi-account LLM provider switcher (claude, codex, zai, grok, cursor). Credentials via OS keychain. (renamed from "as" to avoid conflict with LLVM as)')
+  .description('Multi-account LLM provider switcher (claude, codex, zai, grok, cursor). Credentials in per-profile 0600 files under the asx config dir. (renamed from "as" to avoid conflict with LLVM as)')
   .version('0.3.0');
 
 program
@@ -211,7 +238,12 @@ program
           } catch {}
         }
 
-        console.log(`${star} ${a.name}${emailPart}${labelPart}${systemMark}`);
+        // Only annotate non-default sharing (default = share all -> no tag).
+        const sharePart = a.share === undefined ? ''
+          : a.share.length === 0 ? chalk.yellow(' [isolated]')
+          : chalk.yellow(` [shares: ${a.share.join(',')}]`);
+
+        console.log(`${star} ${a.name}${emailPart}${labelPart}${systemMark}${sharePart}`);
 
         if (opts.debug) {
           try {
@@ -241,11 +273,14 @@ program
     }
   });
 
-program
+withShareFlags(program
   .command('load [provider] [name]')
-  .description('Load (snapshot) currently active credential(s) from provider into asx. If no provider given, auto-detects main providers.')
-  .action(async (provider?: string, name?: string) => {
+  .description('Load (snapshot) currently active credential(s) from provider into asx. If no provider given, auto-detects main providers.'))
+  .action(async (provider?: string, name?: string, opts: ShareOpts = {}) => {
     const { getSecret } = await import('./storage/secure-store.js');
+    let share: { provided: boolean; value?: string[] };
+    try { share = resolveShareFlags(opts); }
+    catch (e: any) { console.error(chalk.red(e.message || e)); process.exit(1); }
     // No provider: scan every known agent configured on this machine (not a fixed list).
     const targets: Array<{provider: string, explicitName?: string}> = provider
       ? [{ provider, explicitName: name }]
@@ -292,6 +327,7 @@ program
         // Prefer the local credential: loadCurrent() snapshots the native cred, so a
         // stored profile that differs is overwritten with the local one.
         await adapter.loadCurrent(finalName);
+        if (share!.provided) setShare(p, finalName, share!.value);
         any = true;
 
         const verb = existingCred === null ? 'Loaded'
@@ -312,7 +348,8 @@ program
 
 // Non-destructive re-login flow: save current session, clear local, run native login,
 // load the new session. Reused by `asx login` and by `asx refresh` when a token is revoked.
-async function runLoginFlow(p: string, adapter: any, name?: string, opts: { longLived?: boolean } = {}): Promise<boolean> {
+// Returns the final account name on success, or null on failure.
+async function runLoginFlow(p: string, adapter: any, name?: string, opts: { longLived?: boolean } = {}): Promise<string | null> {
   const isClaude = p === 'claude' || p === 'claude-code';
   if (isClaude && opts.longLived && typeof adapter.loadLongLivedToken === 'function') {
     const loginCmd = ['claude', 'setup-token'];
@@ -320,7 +357,7 @@ async function runLoginFlow(p: string, adapter: any, name?: string, opts: { long
     const exitCode = await runCommand(loginCmd[0], loginCmd.slice(1));
     if (exitCode !== 0) {
       console.log(chalk.yellow(`Native token setup exited with code ${exitCode}.`));
-      return false;
+      return null;
     }
 
     const targetName = name || deriveAccountName(undefined, p);
@@ -330,11 +367,11 @@ async function runLoginFlow(p: string, adapter: any, name?: string, opts: { long
     })();
     if (!token.trim()) {
       console.error(chalk.red('No token provided.'));
-      return false;
+      return null;
     }
     await adapter.loadLongLivedToken(targetName, token);
     console.log(chalk.green(`Loaded ${p}/${targetName} long-lived token.`));
-    return true;
+    return targetName;
   }
 
   if (p === 'zai' && typeof adapter.login === 'function') {
@@ -342,10 +379,10 @@ async function runLoginFlow(p: string, adapter: any, name?: string, opts: { long
     try {
       await adapter.login(targetName);
       console.log(chalk.green(`Loaded ${p}/${targetName} after login.`));
-      return true;
+      return targetName;
     } catch (e: any) {
       console.error(chalk.red(`Failed to login ${p}/${targetName}: ${e.message || e}`));
-      return false;
+      return null;
     }
   }
 
@@ -353,13 +390,16 @@ async function runLoginFlow(p: string, adapter: any, name?: string, opts: { long
   if (!loginCmd || loginCmd.length === 0) {
     console.log(chalk.yellow(`Login flow is not supported for provider '${p}'.`));
     console.log(chalk.gray(`For API-key providers without a login flow, use environment variables or run the native tool then 'asx load ${p} <name>'.`));
-    return false;
+    return null;
   }
 
   if (isClaude) {
     const targetName = name || deriveAccountName(undefined, p);
     const spec = agentSpec('claude')!;
-    const dir = stableAgentHome('claude', targetName, spec.sub);
+    // Log in directly into the profile home so the native .credentials.json lands
+    // in the SSOT location; loadCurrent then snapshots it in place.
+    const dir = getProfileHome('claude', targetName);
+    ensureHome700(dir);
     seedAgentHome('claude', dir);
     try { fs.unlinkSync(path.join(dir, spec.file)); } catch {}
 
@@ -374,10 +414,10 @@ async function runLoginFlow(p: string, adapter: any, name?: string, opts: { long
       process.env.CLAUDE_CONFIG_DIR = dir;
       await adapter.loadCurrent(targetName);
       console.log(chalk.green(`Loaded ${p}/${targetName} after login.`));
-      return true;
+      return targetName;
     } catch (e: any) {
       console.error(chalk.red(`Failed to load new session: ${e.message || e}`));
-      return false;
+      return null;
     } finally {
       if (prev === undefined) delete process.env.CLAUDE_CONFIG_DIR;
       else process.env.CLAUDE_CONFIG_DIR = prev;
@@ -415,20 +455,23 @@ async function runLoginFlow(p: string, adapter: any, name?: string, opts: { long
     if (!targetName) targetName = deriveAccountName(newEmail, p);
     await adapter.loadCurrent(targetName);
     console.log(chalk.green(`Loaded ${p}/${targetName} after login.`));
-    return true;
+    return targetName;
   } catch (e: any) {
     console.error(chalk.red(`Failed to load new session: ${e.message || e}`));
-    return false;
+    return null;
   }
 }
 
-program
+withShareFlags(program
   .command('login [provider] [name]')
   .description('Login and store a new account. Claude defaults to native access/refresh tokens in an isolated CLAUDE_CONFIG_DIR; use --long-lived for setup-token.\nProvider is optional when a profile name identifies it: asx login jn.claude')
-  .option('--long-lived', 'For Claude only: run `claude setup-token` and store CLAUDE_CODE_OAUTH_TOKEN instead of native access/refresh tokens')
-  .action(async (a?: string, b?: string, opts: { longLived?: boolean } = {}) => {
+  .option('--long-lived', 'For Claude only: run `claude setup-token` and store CLAUDE_CODE_OAUTH_TOKEN instead of native access/refresh tokens'))
+  .action(async (a?: string, b?: string, opts: { longLived?: boolean } & ShareOpts = {}) => {
     const { provider, name } = resolveProviderName(a, b);
     if (!provider) { console.error(chalk.red('Specify a provider or a profile name. e.g. asx login claude | asx login jn.claude')); process.exit(1); }
+    let share: { provided: boolean; value?: string[] };
+    try { share = resolveShareFlags(opts); }
+    catch (e: any) { console.error(chalk.red(e.message || e)); process.exit(1); }
     let adapter: any;
     try {
       adapter = getAdapter(provider);
@@ -436,7 +479,8 @@ program
       console.error(chalk.red(e.message || e));
       return;
     }
-    await runLoginFlow(provider, adapter, name, opts);
+    const finalName = await runLoginFlow(provider, adapter, name, opts);
+    if (finalName && share!.provided) setShare(provider, finalName, share!.value);
   });
 
 program
@@ -509,11 +553,31 @@ program
         prov = acct.provider;
       }
       const ok = removeAccount(prov, nm);
-      if (ok) console.log(chalk.green(`Removed ${prov}/${nm}`));
-      else console.log('Not found');
+      if (ok) {
+        const { deleteSecret } = await import('./storage/secure-store.js');
+        await deleteSecret(prov, nm);
+        console.log(chalk.green(`Removed ${prov}/${nm}`));
+      } else console.log('Not found');
     } catch (e: any) {
       console.error(chalk.red(e.message || e));
     }
+  });
+
+withShareFlags(program
+  .command('sharing <name>')
+  .description(`Show or change what a profile shares from the provider's default home.\nCategories: ${SHARE_CATEGORIES.join(', ')}. With no flags, prints the current setting.\nExamples:\n  asx sharing ed.claude --isolated\n  asx sharing ed.claude --share sessions,skills\n  asx sharing ed.claude --isolate settings`))
+  .action((name: string, opts: ShareOpts = {}) => {
+    const acc = getAccountByName(name);
+    if (!acc) { console.error(chalk.red(`No account found with name "${name}"`)); process.exit(1); }
+    let share: { provided: boolean; value?: string[] };
+    try { share = resolveShareFlags(opts); }
+    catch (e: any) { console.error(chalk.red(e.message || e)); process.exit(1); }
+    if (share!.provided) {
+      setShare(acc.provider, acc.name, share!.value);
+      console.log(chalk.green(`Updated sharing for ${acc.provider}/${acc.name}`));
+    }
+    const cur = getAccount(acc.provider, acc.name);
+    console.log(`${acc.provider}/${acc.name}: ${describeShare(cur?.share)}`);
   });
 
 program
@@ -578,10 +642,9 @@ program
     const url = proxyHandle.url!;
 
     // Reuse the exec injection to produce the exact config/env the frontend needs, into a
-    // persistent dir, then tell the user which env vars to export to use it.
-    const dir = fs.mkdtempSync(path.join(getAsxTmpBase(), `asx-proxy-${frontendProvider}-`));
-    // Clean the temp dir on any exit (normal, crash, uncaught), not just Ctrl+C.
-    process.on('exit', () => { try { fs.rmSync(dir, { recursive: true, force: true }); } catch {} });
+    // persistent per-frontend scratch home under the asx config dir, then tell the user
+    // which env vars to export to use it. The config is regenerated each run.
+    const dir = agentScratchHome(frontendProvider, name);
     const injected: NodeJS.ProcessEnv = {};
     await injectProxyEndpoint(frontendProvider, injected, url, dir, backendProvider);
 
@@ -600,7 +663,6 @@ program
 
     const shutdown = () => {
       try { proxyHandle.stop(); } catch {}
-      try { fs.rmSync(dir, { recursive: true, force: true }); } catch {}
       process.exit(0);
     };
     process.on('SIGINT', shutdown);
@@ -658,38 +720,20 @@ program
     }
     const nativeBin = spec.bin;
 
-    const isCurrent = getActive(profileProvider) === accountName;
-
     let env = { ...process.env };
-    let tmpDir: string | null = null;
     let proxyHandle: { url?: string; stop: () => void } | null = null;
-    let syncCredentialPath: string | null = null;
-    let syncOriginalCredential: string | null = null;
     let profileSecret: string | null | undefined;
     const readProfileSecret = async () => {
       if (profileSecret === undefined) profileSecret = await getSecret(profileProvider, accountName);
       return profileSecret;
     };
 
+    // The profile home IS the store: the native binary reads/writes its auth file
+    // directly there, so a refreshed token is persisted in place — no copy-out,
+    // no sync-back, no temp dir to clean up. Only the proxy needs stopping.
     const cleanup = () => {
       if (proxyHandle) {
         try { proxyHandle.stop(); } catch {}
-      }
-      if (tmpDir && fs.existsSync(tmpDir)) {
-        try { fs.rmSync(tmpDir, { recursive: true, force: true }); } catch {}
-      }
-    };
-
-    const syncCredentialBack = async () => {
-      if (!syncCredentialPath || !fs.existsSync(syncCredentialPath)) return;
-      try {
-        const next = fs.readFileSync(syncCredentialPath, 'utf8').trim();
-        if (!next || next === syncOriginalCredential) return;
-        JSON.parse(next);
-        await setSecret(profileProvider, accountName, next);
-        dlog(chalk.gray(`[asx exec] synced refreshed ${profileProvider}/${accountName} credential from isolated CLAUDE_CONFIG_DIR`));
-      } catch (e: any) {
-        dlog(chalk.yellow(`[asx exec] skipped credential sync: ${e?.message || e}`));
       }
     };
 
@@ -709,50 +753,41 @@ program
       if (!isCross && normalizeProvider(agentProvider) === 'claude' && claudeLongLivedToken) {
         env.CLAUDE_CODE_OAUTH_TOKEN = claudeLongLivedToken;
       }
-      const useClaudeNativeFile = !isCross
-        && normalizeProvider(profileProvider) === 'claude'
-        && normalizeProvider(agentProvider) === 'claude'
-        && !claudeLongLivedToken;
+      // Always run under a home injected via the provider's home env var — the
+      // native binary never touches the user's default location.
+      if (!isCross) {
+        // Same provider: the profile home already holds the credential at the
+        // native filename (SSOT). Point the binary at it directly — no copy.
+        const home = getProfileHome(profileProvider, accountName);
+        ensureHome700(home);
+        env[spec.homeEnv] = home;
+        seedAgentHome(agentProvider, home);
+        // Share the categories this profile opted into (default: all) from the
+        // provider's default home so the isolated profile isn't a blank slate.
+        linkSharedState(profileProvider, home, { isCross: false, categories: acct.share });
 
-      // Isolation policy:
-      // - Always isolate when cross (different agent vs profile provider)
-      // - When not cross, follow the original "isCurrent" logic for the profile.
-      const forceIsolation = isCross || useClaudeNativeFile || (!!claudeLongLivedToken && normalizeProvider(agentProvider) === 'claude');
-      if (!isCurrent || forceIsolation) {
-        const d = useClaudeNativeFile
-          ? stableAgentHome(profileProvider, accountName, spec.sub)
-          : (() => {
-              tmpDir = fs.mkdtempSync(path.join(getAsxTmpBase(), `asx-${accountName.replace(/[^a-zA-Z0-9_-]/g, '_')}-`));
-              fs.chmodSync(tmpDir, 0o700);
-              const p = path.join(tmpDir, spec.sub);
-              fs.mkdirSync(p, { recursive: true });
-              return p;
-            })();
-        env[spec.homeEnv] = d;
-        seedAgentHome(agentProvider, d);
-
-        if (!isCross) {
-          // Same provider: copy the profile's real credential into the agent's temp home.
-          if (!(normalizeProvider(agentProvider) === 'claude' && claudeLongLivedToken)) {
-            const credPath = path.join(d, spec.file);
-            let cred = fs.existsSync(credPath) ? fs.readFileSync(credPath, 'utf8').trim() : null;
-            if (!cred) {
-              cred = await readProfileSecret();
-              if (!cred) {
-                console.error(chalk.red(`No stored credential for ${profileProvider}/${accountName}`));
-                process.exit(1);
-              }
-              fs.writeFileSync(credPath, cred, { mode: 0o600 });
-            }
-            if (useClaudeNativeFile) {
-              syncCredentialPath = credPath;
-              syncOriginalCredential = cred;
-            }
+        // A long-lived token is injected via env instead of a credential file.
+        if (!(normalizeProvider(agentProvider) === 'claude' && claudeLongLivedToken)) {
+          const cred = await readProfileSecret();
+          if (!cred) {
+            console.error(chalk.red(`No stored credential for ${profileProvider}/${accountName}`));
+            process.exit(1);
           }
-        } else if (spec.stub) {
-          // Cross: seed a boot stub so the binary skips its own login (real backend auth is
-          // the proxy's). grok has stub=null — its injected config.toml handles auth instead.
-          try { fs.writeFileSync(path.join(d, spec.file), spec.stub(), { mode: 0o600 }); } catch {}
+          // cred already lives at getProfileCredentialPath(profileProvider, accountName),
+          // which equals <home>/<native file>. Nothing to materialize.
+        }
+      } else {
+        // Cross: the agent binary runs under a dedicated scratch home with a dummy
+        // stub so it skips its own login; the real backend auth is the proxy's.
+        const home = agentScratchHome(agentProvider, accountName);
+        env[spec.homeEnv] = home;
+        seedAgentHome(agentProvider, home);
+        // Share the agent's own session history/settings (but not config.toml —
+        // the proxy injection rewrites that below), honoring the profile's choice.
+        linkSharedState(agentProvider, home, { isCross: true, categories: acct.share });
+        if (spec.stub) {
+          // grok has stub=null — its injected config.toml handles auth instead.
+          try { fs.writeFileSync(path.join(home, spec.file), spec.stub(), { mode: 0o600 }); } catch {}
         }
       }
 
@@ -799,23 +834,21 @@ program
           // What the backend actually is (profile's provider)
           targetProvider: profileProvider,
           targetCredential: { apiKey: backendCred, raw: backendCred, type: profileProvider === 'claude' ? 'anthropic' : 'openai' } as any,
-          tmpDir: tmpDir || undefined,
         });
 
         if (proxyHandle?.url) {
-          await injectProxyEndpoint(agentProvider, env, proxyHandle.url, tmpDir ?? undefined, profileProvider);
+          // The agent's home (already set as env[spec.homeEnv]) is where codex/grok
+          // proxy config.toml is written; injectClaudeProxy uses env vars only.
+          await injectProxyEndpoint(agentProvider, env, proxyHandle.url, env[spec.homeEnv], profileProvider);
         }
       }
 
       dlog(chalk.blue(`[asx exec] agent=${agentProvider} profile=${profileProvider}/${accountName} isolated=${!!env[spec.homeEnv]}${bypass ? ' +bypass' : ''}${isCross ? ' +proxy' : ''}`));
       const child = spawnNative(nativeBin, forwardArgs, { env, stdio: 'inherit' });
 
-      child.on('exit', async (code) => {
-        try { await syncCredentialBack(); }
-        finally {
-          cleanup();
-          process.exit(code ?? 0);
-        }
+      child.on('exit', (code) => {
+        cleanup();
+        process.exit(code ?? 0);
       });
 
       child.on('error', (err) => {
@@ -833,7 +866,7 @@ program
 
 // Default command: `asx <account> [provider] [args]` -> `asx e <account> ...`
 // when the first token is a stored account name rather than a subcommand.
-const KNOWN_CMDS = new Set(['list', 'ls', 'load', 'login', 'switch', 'rename', 'remove', 'status', 'exec', 'e', 'help']);
+const KNOWN_CMDS = new Set(['list', 'ls', 'load', 'login', 'switch', 'rename', 'remove', 'status', 'exec', 'e', 'sharing', 'help']);
 const first = process.argv[2];
 if (first && !first.startsWith('-') && !KNOWN_CMDS.has(first) && getAccountByName(first)) {
   process.argv.splice(2, 0, 'e');

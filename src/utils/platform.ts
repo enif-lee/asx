@@ -82,12 +82,6 @@ export function ensureDirFor(filePath: string): void {
   }
 }
 
-export function getAsxTmpBase(): string {
-  // asx isolation dirs (isolated agent homes holding copied credentials) live under /tmp on
-  // unix-like systems. Windows has no /tmp, so fall back to the OS temp dir there.
-  return getPlatform() === 'win32' ? os.tmpdir() : '/tmp';
-}
-
 export function getAsxConfigDir(): string {
   // Our own config dir for metadata (not secrets)
   const base = getConfigBaseDir();
@@ -96,4 +90,11 @@ export function getAsxConfigDir(): string {
 
 export function getAsxAccountsPath(): string {
   return path.join(getAsxConfigDir(), 'accounts.json');
+}
+
+// Persistent per-profile home directories live here. Each profile owns a 0700
+// directory that doubles as the native CLI's home (CODEX_HOME/CLAUDE_CONFIG_DIR/
+// GROK_HOME), holding its auth file (0600) as the single source of truth.
+export function getAsxProfilesDir(): string {
+  return path.join(getAsxConfigDir(), 'profiles');
 }
