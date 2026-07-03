@@ -3,6 +3,7 @@ import path from 'node:path';
 import { dlog } from '../utils/log.js';
 import { backendChoices } from './models.js';
 import { getAsxProfilesDir } from '../utils/platform.js';
+import { codexModelInfo } from './adapters/codex.js';
 
 // Last-resort scratch home for the injected native config when the caller did not
 // provide a home. Both real callers (exec, `asx proxy`) always pass one, so this is
@@ -50,6 +51,7 @@ async function injectCodexProxy(tmpDir: string | undefined, proxyBaseUrl: string
 
   env.CODEX_HOME = codexHome; // always expose it (exec seeds it too; standalone prints it)
   const cfgPath = path.join(codexHome, 'config.toml');
+  const catalogPath = path.join(codexHome, 'models.json');
   fs.mkdirSync(codexHome, { recursive: true });
 
   const providerId = 'asx-proxy';
@@ -57,6 +59,7 @@ async function injectCodexProxy(tmpDir: string | undefined, proxyBaseUrl: string
   // Important: Codex expects base_url to point to the root where /v1 or /responses lives.
   // We follow opencodex convention: base_url ends with /v1, wire_api=responses.
   const base = proxyBaseUrl.replace(/\/+$/, '');
+  env.ASX_PROXY_API_KEY = env.ASX_PROXY_API_KEY || 'asx-proxy-dummy';
 
   // A clean, aggressive config that forces the proxy provider.
   // We overwrite the file with a minimal reliable content for this isolated run.
@@ -64,15 +67,24 @@ async function injectCodexProxy(tmpDir: string | undefined, proxyBaseUrl: string
 # This file is inside a private CODEX_HOME for this run only.
 model = ${JSON.stringify(model)}
 model_provider = "${providerId}"
+model_catalog_json = ${JSON.stringify(catalogPath)}
+model_context_window = 200000
+model_auto_compact_token_limit = 160000
+model_supports_reasoning_summaries = false
+model_reasoning_summary = "none"
 
 [model_providers.${providerId}]
 name = "ASX Proxy"
 base_url = "${base}/v1"
+env_key = "ASX_PROXY_API_KEY"
 wire_api = "responses"
-requires_openai_auth = true
+requires_openai_auth = false
 `;
 
   try {
+    fs.writeFileSync(catalogPath, JSON.stringify({
+      models: models.map((m, i) => codexModelInfo(m, i, { provider: providerId, hidden: false })),
+    }, null, 2), { mode: 0o600 });
     fs.writeFileSync(cfgPath, cleanConfig, { mode: 0o600 });
 
     dlog(`[asx-proxy] Injected Codex config at ${cfgPath}`);

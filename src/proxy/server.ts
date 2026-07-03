@@ -25,10 +25,12 @@ export async function startProxy(options: ProxyStartOptions): Promise<ProxyHandl
     const isModels = req.method === 'GET' && /\/(v1\/)?models\/?$/.test(urlPath);
     dlog(`[asx-proxy] ${req.method} ${urlPath} (agent=${agentProvider}->backend=${backendProvider}, id=${reqId}${isInference ? ', inference' : ''})`);
 
-    // Track whether the client (agent) has closed the connection so we can cancel
-    // the upstream stream instead of reading it into a dead socket.
+    // Track whether the client (agent) has closed the response early so we can
+    // cancel the upstream stream instead of reading it into a dead socket.
     let clientClosed = false;
-    req.on('close', () => { clientClosed = true; });
+    res.on('close', () => {
+      if (!res.writableEnded) clientClosed = true;
+    });
 
     try {
       if (isModels) {

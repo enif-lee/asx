@@ -32,25 +32,12 @@ function deriveAccountName(email: string | undefined, provider: string): string 
   return `${local}.${short}`;
 }
 
-// Forge a structurally valid (unsigned) JWT + codex auth.json so the codex binary boots
-// under a non-codex profile. Codex parses the id_token's claims locally; real calls hit the proxy.
-function fakeCodexAuth(): string {
-  const b64 = (o: any) => Buffer.from(JSON.stringify(o)).toString('base64url');
-  const claims = {
-    exp: Math.floor(Date.now() / 1000) + 365 * 24 * 3600,
-    'https://api.openai.com/auth': { chatgpt_account_id: 'asx-proxy', chatgpt_plan_type: 'pro' },
-    email: 'proxy@asx.local',
-  };
-  const jwt = `${b64({ alg: 'none', typ: 'JWT' })}.${b64(claims)}.sig`;
-  return JSON.stringify({ OPENAI_API_KEY: null, tokens: { id_token: jwt, access_token: jwt, refresh_token: 'asx-proxy-refresh', account_id: 'asx-proxy' }, last_refresh: new Date().toISOString() });
-}
-
 // Per-agent facts: native binary, the env var + temp subdir + auth file used to isolate it,
 // full-access bypass flags, and the boot stub written when running under a *cross* profile
-// (so the binary skips its own login). stub=null → no file needed (grok routes via config.toml).
+// (so the binary skips its own login). stub=null → no file needed (config/env handles auth).
 interface AgentSpec { bin: string; homeEnv: string; file: string; bypass: string[]; stub: (() => string) | null; }
 const AGENT_SPEC: Record<string, AgentSpec> = {
-  codex: { bin: 'codex', homeEnv: 'CODEX_HOME', file: 'auth.json', bypass: ['--dangerously-bypass-approvals-and-sandbox', '--dangerously-bypass-hook-trust'], stub: fakeCodexAuth },
+  codex: { bin: 'codex', homeEnv: 'CODEX_HOME', file: 'auth.json', bypass: ['--dangerously-bypass-approvals-and-sandbox', '--dangerously-bypass-hook-trust'], stub: null },
   claude: { bin: 'claude', homeEnv: 'CLAUDE_CONFIG_DIR', file: '.credentials.json', bypass: ['--dangerously-skip-permissions'], stub: () => JSON.stringify({ claudeAiOauth: { accessToken: 'asx-proxy-dummy' } }) },
   grok: { bin: 'grok', homeEnv: 'GROK_HOME', file: 'auth.json', bypass: ['--dangerously-skip-permissions'], stub: null },
 };

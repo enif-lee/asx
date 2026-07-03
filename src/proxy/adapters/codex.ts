@@ -273,45 +273,50 @@ export const codexAgent: AgentAdapter = {
 
   // Codex 0.142.x deserializes GET /models into { models: ModelInfo[] } where ModelInfo has many
   // required fields (slug/display_name/truncation_policy/...). Anything less makes codex fall back
-  // to degraded metadata and leaves the `/model` picker empty. Fields mirror codex's bundled
-  // models.json fixture. Extra keys are ignored (no deny_unknown_fields).
+  // to degraded metadata and leaves the `/model` picker empty.
   formatModels(choices) {
-    const REASONING = [
-      { effort: 'low', description: 'Fast responses with lighter reasoning' },
-      { effort: 'medium', description: 'Balances speed and reasoning depth' },
-      { effort: 'high', description: 'Greater reasoning depth for complex problems' },
-    ];
-    const models = choices.map((c, i) => ({
-      slug: c.id,
-      display_name: c.id,
-      description: null,
-      default_reasoning_level: c.effort || 'medium',
-      supported_reasoning_levels: REASONING,
-      shell_type: 'shell_command',
-      visibility: 'list',
-      supported_in_api: true,
-      priority: i,
-      availability_nux: null,
-      upgrade: null,
-      base_instructions: '',
-      supports_reasoning_summaries: true,
-      default_reasoning_summary: 'none',
-      support_verbosity: false,
-      default_verbosity: null,
-      apply_patch_tool_type: 'freeform',
-      web_search_tool_type: 'text_and_image',
-      truncation_policy: { mode: 'tokens', limit: 10000 },
-      supports_parallel_tool_calls: true,
-      supports_image_detail_original: true,
-      context_window: 200000,
-      max_context_window: 200000,
-      auto_compact_token_limit: null,
-      experimental_supported_tools: [],
-      input_modalities: ['text', 'image'],
-      supports_search_tool: false,
-      service_tiers: [],
-      additional_speed_tiers: [],
-    }));
-    return { models };
+    return { models: choices.map((c, i) => codexModelInfo(c.id, i, { effort: c.effort })) };
   },
 };
+
+const REASONING_LEVELS = [
+  { effort: 'low', description: 'Fast responses with lighter reasoning' },
+  { effort: 'medium', description: 'Balances speed and reasoning depth' },
+  { effort: 'high', description: 'Greater reasoning depth for complex problems' },
+];
+
+export function codexModelInfo(slug: string, priority = 0, opts: { effort?: string; provider?: string; hidden?: boolean } = {}) {
+  return {
+    slug,
+    display_name: slug,
+    description: null,
+    default_reasoning_level: opts.effort || 'medium',
+    supported_reasoning_levels: REASONING_LEVELS,
+    shell_type: 'shell_command',
+    visibility: 'list',
+    supported_in_api: true,
+    priority,
+    availability_nux: null,
+    upgrade: null,
+    base_instructions: '',
+    supports_reasoning_summaries: true,
+    default_reasoning_summary: 'none',
+    support_verbosity: false,
+    default_verbosity: null,
+    apply_patch_tool_type: 'freeform',
+    web_search_tool_type: 'text_and_image',
+    truncation_policy: { mode: 'tokens', limit: 10000 },
+    supports_parallel_tool_calls: true,
+    supports_image_detail_original: true,
+    context_window: 200000,
+    max_context_window: 200000,
+    auto_compact_token_limit: null,
+    experimental_supported_tools: [],
+    input_modalities: ['text', 'image'],
+    supports_search_tool: false,
+    service_tiers: [],
+    additional_speed_tiers: [],
+    ...(opts.provider ? { provider: opts.provider } : {}),
+    ...(opts.hidden !== undefined ? { hidden: opts.hidden } : {}),
+  };
+}
