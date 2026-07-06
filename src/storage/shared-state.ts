@@ -4,15 +4,19 @@ import { getHomeDotDir } from '../utils/platform.js';
 
 // Categories an isolated agent profile can independently share from / isolate
 // against the user's system provider home. A profile stores the subset it shares (see account-store
-// `share`): undefined => all categories, [] => fully isolated.
-export const SHARE_CATEGORIES = ['sessions', 'skills', 'agents', 'hooks', 'settings'] as const;
+// `share`): undefined => the safe default categories, [] => fully isolated.
+export const SHARE_CATEGORIES = ['sessions', 'skills', 'agents', 'hooks', 'settings', 'state', 'cache', 'logs'] as const;
 export type ShareCategory = (typeof SHARE_CATEGORIES)[number];
 
-type Entry = { name: string; type: 'dir' | 'file'; cat: ShareCategory };
+type Entry =
+  | { name: string; type: 'dir' | 'file'; cat: ShareCategory }
+  | { match: RegExp; type: 'file'; cat: ShareCategory };
+type ResolvedEntry = { name: string; type: 'dir' | 'file'; cat: ShareCategory };
 
-// State each provider keeps in its home, tagged by category. Auth files and volatile
-// runtime state (caches, logs, sqlite dbs, tmp) are deliberately absent — those always
-// stay isolated per profile; only identity (the auth file) is truly per-profile.
+const EXPLICIT_ONLY = new Set<ShareCategory>(['state', 'cache', 'logs']);
+
+// State each provider keeps in its home, tagged by category. Auth files and tmp/process
+// scratch remain isolated. Runtime state is explicit opt-in only; default sharing stays safe.
 const SHARED: Record<string, Entry[]> = {
   claude: [
     { name: 'projects', type: 'dir', cat: 'sessions' },
@@ -40,6 +44,17 @@ const SHARED: Record<string, Entry[]> = {
     { name: 'plugins', type: 'dir', cat: 'settings' },
     { name: 'AGENTS.md', type: 'file', cat: 'settings' },
     { name: 'config.toml', type: 'file', cat: 'settings' },
+    { name: '.codex-global-state.json', type: 'file', cat: 'state' },
+    { name: '.codex-global-state.json.bak', type: 'file', cat: 'state' },
+    { name: '.app-server-state-reconciled-v1', type: 'file', cat: 'state' },
+    { name: '.personality_migration', type: 'file', cat: 'state' },
+    { name: 'sqlite', type: 'dir', cat: 'state' },
+    { match: /^(state|goals|memories)_\d+\.sqlite(?:-(?:shm|wal))?$/, type: 'file', cat: 'state' },
+    { match: /^logs_\d+\.sqlite(?:-(?:shm|wal))?$/, type: 'file', cat: 'logs' },
+    { name: 'log', type: 'dir', cat: 'logs' },
+    { name: 'cache', type: 'dir', cat: 'cache' },
+    { name: 'vendor_imports', type: 'dir', cat: 'cache' },
+    { match: /^models_cache.*\.json$/, type: 'file', cat: 'cache' },
   ],
   grok: [
     { name: 'sessions', type: 'dir', cat: 'sessions' },
@@ -86,6 +101,11 @@ export function supportedShareCategories(provider: string): ShareCategory[] {
   return SHARE_CATEGORIES.filter((c) => cats.has(c));
 }
 
+export function defaultShareCategories(provider?: string): ShareCategory[] {
+  const cats = provider ? supportedShareCategories(provider) : SHARE_CATEGORIES;
+  return cats.filter((c) => !EXPLICIT_ONLY.has(c));
+}
+
 export function parseCategoriesForProvider(csv: string, provider: string): ShareCategory[] {
   const cats = parseCategories(csv);
   const supported = supportedShareCategories(provider);
@@ -107,13 +127,35 @@ export function resolveShareSelection(o: ShareSelectionOpts, provider?: string):
   const parse = provider ? (s: string) => parseCategoriesForProvider(s, provider) : parseCategories;
   if (o.share !== undefined) return { provided: true, value: parse(o.share) };
   const exclude = parse(o.isolate!);
-  const base = provider ? supportedShareCategories(provider) : SHARE_CATEGORIES;
+  const base = defaultShareCategories(provider);
   return { provided: true, value: base.filter((c) => !exclude.includes(c)) };
+}
+
+function resolveEntries(entries: Entry[], base: string): ResolvedEntry[] {
+  let names: string[] | null = null;
+  const out: ResolvedEntry[] = [];
+  const seen = new Set<string>();
+  for (const e of entries) {
+    if ('name' in e) {
+      out.push(e);
+      continue;
+    }
+    if (!names) {
+      try { names = fs.readdirSync(base); } catch { names = []; }
+    }
+    for (const name of names) {
+      if (e.match.test(name) && !seen.has(name)) {
+        seen.add(name);
+        out.push({ name, type: e.type, cat: e.cat });
+      }
+    }
+  }
+  return out;
 }
 
 // Symlink shared session/history/settings state from the provider's system home
 // into an isolated profile (or cross-provider agent) home. `categories` limits which
-// categories are shared: undefined => all, [] => none (fully isolated). Best-effort:
+// categories are shared: undefined => safe defaults, [] => none (fully isolated). Best-effort:
 // any failure is ignored so an odd/missing default home never blocks execution.
 export function linkSharedState(
   provider: string,
@@ -124,9 +166,9 @@ export function linkSharedState(
   if (!base) return;
   if (path.resolve(base) === path.resolve(home)) return; // never self-link
 
-  const allow = opts.categories; // undefined => share every category
-  for (const { name, type, cat } of SHARED[providerKey(provider)] || []) {
-    if (allow && !allow.includes(cat)) continue;
+  const allow = opts.categories === undefined ? defaultShareCategories(provider) : opts.categories;
+  for (const { name, type, cat } of resolveEntries(SHARED[providerKey(provider)] || [], base)) {
+    if (!allow.includes(cat)) continue;
     if (opts.isCross && INJECTED_WHEN_CROSS.has(name)) continue;
     const target = path.join(base, name);
     const link = path.join(home, name);
@@ -150,7 +192,8 @@ export function linkSharedState(
 // Human-readable summary of a profile's `share` value for `list` / `sharing`.
 export function describeShare(share: string[] | undefined, provider?: string): string {
   const categories = provider ? supportedShareCategories(provider) : SHARE_CATEGORIES;
-  if (share === undefined) return `shared: ${categories.join(', ')}`;
+  const defaults = defaultShareCategories(provider);
+  if (share === undefined) return `shared: ${defaults.join(', ')}`;
   if (share.length === 0) return `isolated: ${categories.join(', ')}`;
   const shared = share.filter((c): c is ShareCategory => categories.includes(c as ShareCategory));
   if (shared.length === 0) return `isolated: ${categories.join(', ')}`;

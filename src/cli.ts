@@ -13,6 +13,7 @@ import { getProfileHome } from './storage/profile-home.js';
 import { linkSharedState, describeShare, resolveShareSelection, SHARE_CATEGORIES, type ShareSelectionOpts } from './storage/shared-state.js';
 import { agentScratchHome, crossSessionAgentHome, removeCrossSessionAgentHome } from './storage/agent-home.js';
 import { parseExecArgs } from './exec-args.js';
+import { resolveDesktopLaunch } from './desktop-launcher.js';
 import { dlog } from './utils/log.js';
 
 function getProviderShortName(provider: string): string {
@@ -129,7 +130,7 @@ function isKnownProviderSync(p: string): boolean { return provIndex.isKnownProvi
 function withShareFlags(cmd: Command): Command {
   return cmd
     .option('--isolated', 'Fully isolate this profile (share nothing from the default provider home)')
-    .option('--shared', 'Share all provider-supported state (the default)')
+    .option('--shared', 'Share the provider safe-default state categories')
     .option('--share <categories>', `Share only these comma-separated categories (${SHARE_CATEGORIES.join(', ')})`)
     .option('--isolate <categories>', 'Share everything except these comma-separated categories');
 }
@@ -137,7 +138,7 @@ function withShareFlags(cmd: Command): Command {
 type ShareOpts = ShareSelectionOpts;
 // Resolve share flags into the value to persist. Returns { provided:false } when no
 // flag was passed (leave the profile's setting untouched). `value` follows the store
-// convention: undefined => share all, [] => isolated, [...] => that subset.
+// convention: undefined => safe defaults, [] => isolated, [...] => that subset.
 function resolveShareFlags(o: ShareOpts, provider?: string): { provided: boolean; value?: string[] } {
   return resolveShareSelection(o, provider);
 }
@@ -625,6 +626,9 @@ withShareFlags(program
     catch (e: any) { console.error(chalk.red(e.message || e)); process.exit(1); }
     if (share!.provided) {
       setShare(acc.provider, acc.name, share!.value);
+      const home = getProfileHome(acc.provider, acc.name);
+      ensureHome700(home);
+      linkSharedState(acc.provider, home, { isCross: false, categories: share!.value });
       console.log(chalk.green(`Updated sharing for ${acc.provider}/${acc.name}`));
     }
     const cur = getAccount(acc.provider, acc.name);
@@ -729,12 +733,13 @@ function getBypassFlags(provider: string): string[] {
 program
   .command('exec <name>')
   .alias('e')
-  .description('Run the native CLI (claude/codex/grok/...) under a profile.\nOptional <target> after name routes via ASX Proxy when providers differ (e.g. asx e ed.codex claude).\nCross-provider context flags: -s/--shared, -i/--isolated, --share <categories>, --isolate <categories>, --keep-context. Use -- before raw agent flags.\nUse -b/--bypass to auto-inject full permission flags per provider.\nExamples:\n  asx e ed.codex\n  asx e personal.zai codex --share sessions,skills "hello"\n  asx e personal.zai codex -- -s raw-agent-flag\n  asx e ed.codex -b "do something dangerous"')
+  .description('Run the native CLI (claude/codex/grok/...) under a profile.\nOptional <target> after name routes via ASX Proxy when providers differ (e.g. asx e ed.codex claude).\nUse --desktop to launch the desktop app with the profile env when supported.\nCross-provider context flags: -s/--shared, -i/--isolated, --share <categories>, --isolate <categories>, --keep-context. Use -- before raw agent flags.\nUse -b/--bypass to auto-inject full permission flags per provider.\nExamples:\n  asx e ed.codex\n  asx e ed.codex --desktop .\n  asx e personal.zai codex --share sessions,skills "hello"\n  asx e personal.zai codex -- -s raw-agent-flag\n  asx e ed.codex -b "do something dangerous"')
   .option('-b, --bypass', 'Automatically inject full-access permission bypass flags for the target provider')
   .option('-d, --debug', 'Show ASX proxy/exec debug logs (to stderr). Off by default.')
+  .option('--desktop', 'Launch the desktop app for the target provider when supported')
   .allowUnknownOption(true)
   .allowExcessArguments(true)
-  .action(async (name: string, options: { bypass?: boolean; debug?: boolean }) => {
+  .action(async (name: string, options: { bypass?: boolean; debug?: boolean; desktop?: boolean }) => {
     const { getAccountByName } = await import('./storage/account-store.js');
     const acct = getAccountByName(name);
     if (!acct) {
@@ -802,6 +807,7 @@ program
     try {
       const execArgs = parseExecArgs(rawAfter, { isCross, agentProvider });
       keepContext = execArgs.keepContext || process.env.ASX_KEEP_CONTEXT === '1';
+      const desktop = options?.desktop || execArgs.desktop;
 
       // Auto-refresh the profile credential if expired, before any cred is read/seeded.
       const wantDebug = options?.debug || execArgs.debug;
@@ -837,7 +843,7 @@ program
         ensureHome700(home);
         env[spec.homeEnv] = home;
         seedAgentHome(agentProvider, home);
-        // Share the categories this profile opted into (default: all) from the
+        // Share the categories this profile opted into (default: safe set) from the
         // provider's default home so the isolated profile isn't a blank slate.
         linkSharedState(profileProvider, home, { isCross: false, categories: acct.share });
 
@@ -881,7 +887,7 @@ program
       // Handle --bypass / -b from either options or raw args
       const bypass = options?.bypass || execArgs.bypass;
 
-      if (bypass) {
+      if (bypass && !desktop) {
         const bypassFlags = getBypassFlags(agentProvider);
         forwardArgs = [...bypassFlags, ...forwardArgs];
       }
@@ -916,8 +922,11 @@ program
         }
       }
 
-      dlog(chalk.blue(`[asx exec] agent=${agentProvider} profile=${profileProvider}/${accountName} isolated=${!!env[spec.homeEnv]}${bypass ? ' +bypass' : ''}${isCross ? ' +proxy' : ''}`));
-      const child = spawnNative(nativeBin, forwardArgs, { env, stdio: 'inherit' });
+      const launch = desktop
+        ? resolveDesktopLaunch(agentProvider, env, forwardArgs, { wait: isCross })
+        : { cmd: nativeBin, args: forwardArgs, source: 'cli' as const };
+      dlog(chalk.blue(`[asx exec] agent=${agentProvider} profile=${profileProvider}/${accountName} isolated=${!!env[spec.homeEnv]}${bypass && !desktop ? ' +bypass' : ''}${isCross ? ' +proxy' : ''}${desktop ? ` +desktop(${launch.source})` : ''}`));
+      const child = spawnNative(launch.cmd, launch.args, { env, stdio: 'inherit' });
       const handleSignal = (signal: NodeJS.Signals) => {
         cleanup();
         try { child.kill(signal); } catch {}
