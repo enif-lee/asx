@@ -123,6 +123,49 @@ describe('linkSharedState (symlink shared history/settings into a profile home)'
 
     expect(fs.existsSync(path.join(profile, 'projects'))).toBe(false);
   });
+
+  it('does not share codex runtime state/cache/logs by default', () => {
+    const def = path.join(home, '.codex');
+    fs.mkdirSync(path.join(def, 'sessions'), { recursive: true });
+    fs.mkdirSync(path.join(def, 'cache'), { recursive: true });
+    fs.mkdirSync(path.join(def, 'log'), { recursive: true });
+    fs.writeFileSync(path.join(def, '.codex-global-state.json'), '{}');
+    fs.writeFileSync(path.join(def, 'state_5.sqlite'), '');
+    fs.writeFileSync(path.join(def, 'logs_2.sqlite'), '');
+    fs.writeFileSync(path.join(def, 'models_cache.json'), '{}');
+
+    const profile = path.join(home, 'profiles', 'codex-work');
+    fs.mkdirSync(profile, { recursive: true });
+
+    linkSharedState('codex', profile);
+
+    expect(fs.lstatSync(path.join(profile, 'sessions')).isSymbolicLink()).toBe(true);
+    expect(fs.existsSync(path.join(profile, '.codex-global-state.json'))).toBe(false);
+    expect(fs.existsSync(path.join(profile, 'state_5.sqlite'))).toBe(false);
+    expect(fs.existsSync(path.join(profile, 'logs_2.sqlite'))).toBe(false);
+    expect(fs.existsSync(path.join(profile, 'models_cache.json'))).toBe(false);
+    expect(fs.existsSync(path.join(profile, 'cache'))).toBe(false);
+    expect(fs.existsSync(path.join(profile, 'log'))).toBe(false);
+  });
+
+  it('shares codex runtime state/cache/logs when explicitly requested', () => {
+    const def = path.join(home, '.codex');
+    fs.mkdirSync(path.join(def, 'cache'), { recursive: true });
+    fs.mkdirSync(path.join(def, 'log'), { recursive: true });
+    fs.writeFileSync(path.join(def, '.codex-global-state.json'), '{}');
+    fs.writeFileSync(path.join(def, 'state_5.sqlite'), '');
+    fs.writeFileSync(path.join(def, 'logs_2.sqlite'), '');
+    fs.writeFileSync(path.join(def, 'models_cache.json'), '{}');
+
+    const profile = path.join(home, 'profiles', 'codex-work');
+    fs.mkdirSync(profile, { recursive: true });
+
+    linkSharedState('codex', profile, { categories: ['state', 'cache', 'logs'] });
+
+    for (const name of ['.codex-global-state.json', 'state_5.sqlite', 'logs_2.sqlite', 'models_cache.json', 'cache', 'log']) {
+      expect(fs.lstatSync(path.join(profile, name)).isSymbolicLink()).toBe(true);
+    }
+  });
 });
 
 describe('parseCategories / describeShare', () => {
@@ -135,13 +178,13 @@ describe('parseCategories / describeShare', () => {
     expect(describeShare(undefined)).toBe('shared: sessions, skills, agents, hooks, settings');
     expect(describeShare([], 'claude')).toBe('isolated: sessions, skills, agents, hooks, settings');
     expect(describeShare(undefined, 'codex')).toBe('shared: sessions, skills, settings');
-    expect(describeShare(['sessions', 'skills', 'agents'], 'codex')).toBe('shared: sessions, skills (isolated: settings)');
-    expect(describeShare(['agents'], 'codex')).toBe('isolated: sessions, skills, settings');
+    expect(describeShare(['sessions', 'skills', 'agents'], 'codex')).toBe('shared: sessions, skills (isolated: settings, state, cache, logs)');
+    expect(describeShare(['agents'], 'codex')).toBe('isolated: sessions, skills, settings, state, cache, logs');
   });
 
   it('validates provider-specific categories', () => {
     expect(supportedShareCategories('claude')).toEqual(['sessions', 'skills', 'agents', 'hooks', 'settings']);
-    expect(supportedShareCategories('codex')).toEqual(['sessions', 'skills', 'settings']);
+    expect(supportedShareCategories('codex')).toEqual(['sessions', 'skills', 'settings', 'state', 'cache', 'logs']);
     expect(() => parseCategories('commands')).toThrow(/Unknown share categor/);
     expect(() => parseCategoriesForProvider('agents', 'codex')).toThrow(/codex does not support/);
   });

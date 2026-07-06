@@ -10,7 +10,7 @@ const AccountSchema = z.object({
   email: z.string().optional(), // extracted from login info
   addedAt: z.string(),
   // Which state categories this isolated profile shares from the provider's system home
-  // (see shared-state.ts). Absent => share all (default). [] => fully isolated.
+  // (see shared-state.ts). Absent => safe defaults. [] => fully isolated.
   share: z.array(z.string()).optional(),
   profileType: z.enum(['system', 'isolated']).optional(),
   meta: z.record(z.string(), z.any()).optional(),
@@ -85,7 +85,7 @@ export function getAccount(provider: string, name: string): AccountRecord | unde
 }
 
 // Set which state categories a profile shares. `undefined` clears the field
-// (= share all, the default); `[]` means fully isolated; a list shares that subset.
+// (= safe defaults); `[]` means fully isolated; a list shares that subset.
 export function setShare(provider: string, name: string, share: string[] | undefined): void {
   const prov = canonicalProvider(provider);
   const store = loadStore();

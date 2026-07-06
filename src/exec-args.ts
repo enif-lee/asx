@@ -4,6 +4,7 @@ export interface ParsedExecArgs {
   forwardArgs: string[];
   bypass: boolean;
   debug: boolean;
+  desktop: boolean;
   keepContext: boolean;
   share: { provided: boolean; value?: string[] };
 }
@@ -29,6 +30,7 @@ export function parseExecArgs(args: string[], opts: { isCross: boolean; agentPro
   const shareOpts: ShareSelectionOpts = {};
   let bypass = false;
   let debug = false;
+  let desktop = false;
   let keepContext = false;
 
   for (let i = 0; i < args.length; i++) {
@@ -43,6 +45,10 @@ export function parseExecArgs(args: string[], opts: { isCross: boolean; agentPro
     }
     if (arg === '-d' || arg === '--debug') {
       debug = true;
+      continue;
+    }
+    if (arg === '--desktop') {
+      desktop = true;
       continue;
     }
 
@@ -90,6 +96,7 @@ export function parseExecArgs(args: string[], opts: { isCross: boolean; agentPro
     forwardArgs,
     bypass,
     debug,
+    desktop,
     keepContext,
     share: resolveShareSelection(shareOpts, opts.isCross ? opts.agentProvider : undefined),
   };

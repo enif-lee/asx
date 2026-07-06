@@ -23,9 +23,18 @@ describe('parseExecArgs', () => {
     expect(parsed.forwardArgs).toEqual(['-s', '--share', 'sessions']);
   });
 
+  it('consumes --desktop before -- and forwards it after --', () => {
+    const parsed = parseExecArgs(['--desktop', '--', '--desktop'], { isCross: false, agentProvider: 'codex' });
+
+    expect(parsed.desktop).toBe(true);
+    expect(parsed.forwardArgs).toEqual(['--desktop']);
+  });
+
   it('supports isolate and rejects conflicting or unsupported share options', () => {
     expect(parseExecArgs(['--isolate', 'settings'], { isCross: true, agentProvider: 'codex' }).share)
       .toEqual({ provided: true, value: ['sessions', 'skills'] });
+    expect(parseExecArgs(['--share', 'state,cache,logs'], { isCross: true, agentProvider: 'codex' }).share)
+      .toEqual({ provided: true, value: ['state', 'cache', 'logs'] });
 
     expect(() => parseExecArgs(['-i', '--share', 'sessions'], { isCross: true, agentProvider: 'codex' }))
       .toThrow(/Use only one/);

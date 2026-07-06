@@ -181,6 +181,10 @@ flowchart TD
 
 `exec` avoids mutating provider-native state by setting the launched process's home env var to a profile or scratch home.
 
+`exec --desktop` uses the provider desktop app when available. Same-provider desktop launches return immediately. Cross-provider desktop launches stay attached because the in-process ASX Proxy and scratch context home must live for the app session. Codex app-bundle launches with `CODEX_HOME` pass a profile-scoped `--user-data-dir`; Claude Desktop launches with `CLAUDE_CONFIG_DIR` set `CLAUDE_USER_DATA_DIR` to the same profile-scoped `desktop-user-data` directory.
+
+Claude Desktop login state is treated as desktop-app browser state, not as the Claude Code credential managed by ASX. ASX does not inject or copy Claude Code OAuth credentials into Claude Desktop; the supported workaround is a per-profile `CLAUDE_USER_DATA_DIR` that can keep its own signed-in Desktop session.
+
 ### Provider Adapters
 
 Provider adapters implement `ProviderAdapter` from `src/providers/base.ts`.
@@ -298,11 +302,11 @@ No ASX Proxy is needed because the launched agent already speaks the backend pro
 Shared-state symlinks are category-controlled for isolated agent profiles. The profile's
 `share` metadata (set at `asx login`, changed with `asx sharing`) selects categories:
 
-- unset `share`: share all categories.
+- unset `share`: share the provider's safe default categories.
 - `share: []`: share nothing.
 - `share: ["sessions", ...]`: share only those categories.
 
-Supported categories are provider-specific. Claude supports `sessions`, `skills`, `agents`, `hooks`, and `settings`; Codex and Grok support `sessions`, `skills`, and `settings`.
+Supported categories are provider-specific. Claude supports `sessions`, `skills`, `agents`, `hooks`, and `settings`; Codex supports `sessions`, `skills`, `settings`, `state`, `cache`, and `logs`; Grok supports `sessions`, `skills`, and `settings`. Codex `state`, `cache`, and `logs` are explicit opt-in categories, not part of the unset/default share set.
 
 `src/storage/shared-state.ts` owns the category → home-entry mapping:
 
@@ -316,12 +320,17 @@ hooks     claude: hooks/
 settings  claude: plugins/ settings.json CLAUDE.md
           codex:  rules/ plugins/ AGENTS.md config.toml
           grok:   completions/ config.toml
+state     codex:  .codex-global-state.json .codex-global-state.json.bak
+                  .app-server-state-reconciled-v1 .personality_migration sqlite/
+                  state_*.sqlite* goals_*.sqlite* memories_*.sqlite*
+cache     codex:  cache/ vendor_imports/ models_cache*.json
+logs      codex:  log/ logs_*.sqlite*
 ```
 
 Linking rules (`linkSharedState`):
 
-- Auth files and volatile runtime state (caches, logs, sqlite, tmp) are never in the map —
-  identity and scratch state stay per-profile unconditionally.
+- Auth files and tmp/process scratch are never in the map. Codex runtime state/cache/log
+  entries are in the map but require an explicit `--share state,cache,logs` selection.
 - Shared directories are created in the system home if missing, so new history written
   through the link lands in the shared home; missing shared *files* are simply skipped.
 - An existing real file/dir in the profile home is never clobbered by a symlink; only
@@ -331,7 +340,7 @@ Linking rules (`linkSharedState`):
 - Everything is best-effort: a missing or odd system home never blocks execution.
 
 Cross-provider runs take the same selection per run via `-s`/`-i`/`--share`/`--isolate`
-(default: the agent provider's full category set), applied to the throwaway context home.
+(default: the agent provider's safe default category set), applied to the throwaway context home.
 
 ### Cross-Provider Execution
 
@@ -354,7 +363,7 @@ flowchart TD
   Proxy -- "ZAI OpenAI-compatible chat completions wire" --> Upstream
 ```
 
-Cross-provider exec consumes ASX options before forwarding agent args. `-s`/`--shared` shares all provider-supported categories; `-i`/`--isolated` shares none; `--share <categories>` and `--isolate <categories>` narrow the per-run context. Args after `--` are always forwarded to the agent.
+Cross-provider exec consumes ASX options before forwarding agent args. `-s`/`--shared` shares the target provider's safe default categories; `-i`/`--isolated` shares none; `--share <categories>` and `--isolate <categories>` narrow the per-run context. Args after `--` are always forwarded to the agent.
 
 In this mode:
 
