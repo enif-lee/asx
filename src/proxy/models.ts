@@ -31,21 +31,24 @@ function defaults(provider: string): BackendChoice[] {
   const p = provider.toLowerCase();
   if (p === 'codex') {
     // GPT-5.6 family (Sol/Terra/Luna) as exposed by Codex model catalog 2026-07.
-    // First four entries are ordered for Claude's 4 built-in slots (opus/sonnet/haiku/fable)
-    // when Claude is the frontend agent: Sol/Terra/Luna + Sol xhigh.
-    // Remaining effort variants fill Codex/Pi pickers (full list via models.json / GET /v1/models).
+    // First four entries map to Claude's Opus/Sonnet/Haiku/Fable slots AND to agent
+    // tier aliases (model: "haiku" → slot 2). Haiku uses Sol-low (same family as the
+    // default, lower effort) rather than Luna: Luna is often preview-gated and 404s
+    // for accounts that already have Sol, which breaks Claude Task subagents that
+    // request model:"haiku".
     const out: BackendChoice[] = [
-      { id: 'gpt-5.6-sol-high', model: 'gpt-5.6-sol', effort: 'high' },
-      { id: 'gpt-5.6-terra-medium', model: 'gpt-5.6-terra', effort: 'medium' },
-      { id: 'gpt-5.6-luna-medium', model: 'gpt-5.6-luna', effort: 'medium' },
-      { id: 'gpt-5.6-sol-xhigh', model: 'gpt-5.6-sol', effort: 'xhigh' },
+      { id: 'gpt-5.6-sol-high', model: 'gpt-5.6-sol', effort: 'high' },     // opus
+      { id: 'gpt-5.6-sol-medium', model: 'gpt-5.6-sol', effort: 'medium' }, // sonnet
+      { id: 'gpt-5.6-sol-low', model: 'gpt-5.6-sol', effort: 'low' },       // haiku
+      { id: 'gpt-5.6-sol-xhigh', model: 'gpt-5.6-sol', effort: 'xhigh' },   // fable
     ];
-    const solEfforts = ['low', 'medium', 'max', 'ultra'] as const; // high/xhigh already above
-    for (const e of solEfforts) out.push({ id: `gpt-5.6-sol-${e}`, model: 'gpt-5.6-sol', effort: e });
-    for (const e of ['low', 'high', 'xhigh', 'max', 'ultra'] as const) {
+    for (const e of ['max', 'ultra'] as const) {
+      out.push({ id: `gpt-5.6-sol-${e}`, model: 'gpt-5.6-sol', effort: e });
+    }
+    for (const e of ['high', 'medium', 'low', 'xhigh', 'max', 'ultra'] as const) {
       out.push({ id: `gpt-5.6-terra-${e}`, model: 'gpt-5.6-terra', effort: e });
     }
-    for (const e of ['low', 'high', 'xhigh', 'max'] as const) {
+    for (const e of ['high', 'medium', 'low', 'xhigh', 'max'] as const) {
       out.push({ id: `gpt-5.6-luna-${e}`, model: 'gpt-5.6-luna', effort: e });
     }
     // Keep GPT-5.5 for accounts/workflows still pinned to 5.5
@@ -126,10 +129,84 @@ export function backendChoices(provider: string): BackendChoice[] {
   return fromEnv(provider) || fromConfigFile(provider) || fromCache(provider) || defaults(provider);
 }
 
-// Map an agent-requested id back to a concrete choice. Falls back to the default (first).
+/** Claude-style agent tier aliases (Task/subagent `model: "haiku"` etc.). */
+export type AgentTier = 'opus' | 'sonnet' | 'haiku' | 'fable';
+
+/**
+ * Detect a Claude (or generic) tier alias in a model id string.
+ * Matches bare names (`haiku`), full Claude ids (`claude-haiku-4-5-…`), and
+ * wrapped ASX ids (`claude-asx-…haiku…`).
+ */
+export function detectAgentTier(id?: string): AgentTier | undefined {
+  if (!id) return undefined;
+  const s = id.toLowerCase();
+  // Order matters: check more specific / less ambiguous names first.
+  if (/\bhaiku\b/.test(s)) return 'haiku';
+  if (/\bfable\b/.test(s)) return 'fable';
+  if (/\bsonnet\b/.test(s)) return 'sonnet';
+  if (/\bopus\b/.test(s)) return 'opus';
+  return undefined;
+}
+
+/**
+ * Pick a backend choice for an agent tier from the available list.
+ * Prefers low-effort / fast variants for haiku so subagents stay on models the
+ * account can actually call (same family as default when possible).
+ */
+export function pickTierChoice(list: BackendChoice[], tier: AgentTier): BackendChoice {
+  if (!list.length) return { id: 'asx-proxy', model: 'asx-proxy' };
+  const find = (pred: (c: BackendChoice) => boolean) => list.find(pred);
+
+  if (tier === 'haiku') {
+    // Fast/cheap: prefer explicit low effort on the default family, then air/mini/fast names.
+    // Do NOT prefer luna/preview small models first — they often 404 while Sol works.
+    return find((c) => c.effort === 'low' && /sol|gpt-5\.5|default/i.test(c.model + c.id))
+      || find((c) => c.effort === 'low')
+      || find((c) => /(?:^|[-_.])(air|mini|fast|flash|haiku)(?:$|[-_.])/i.test(c.id))
+      || find((c) => /low/i.test(c.id))
+      || list[Math.min(2, list.length - 1)]
+      || list[0];
+  }
+  if (tier === 'sonnet') {
+    return find((c) => c.effort === 'medium' && /sol|gpt-5\.5/i.test(c.model + c.id))
+      || find((c) => c.effort === 'medium')
+      || find((c) => /terra|sonnet|medium/i.test(c.id))
+      || list[Math.min(1, list.length - 1)]
+      || list[0];
+  }
+  if (tier === 'fable') {
+    return find((c) => c.effort === 'xhigh' || c.effort === 'max' || c.effort === 'ultra')
+      || find((c) => /xhigh|max|ultra|fable/i.test(c.id))
+      || list[0];
+  }
+  // opus — flagship high
+  return find((c) => c.effort === 'high' && /sol|opus|gpt-5\.5/i.test(c.model + c.id))
+    || find((c) => c.effort === 'high')
+    || list[0];
+}
+
+// Map an agent-requested id back to a concrete choice.
+// Order: exact id/model match → Claude tier alias (haiku/sonnet/…) → default (first).
 export function resolveChoice(provider: string, id?: string): BackendChoice {
   const list = backendChoices(provider);
-  return list.find((c) => c.id === id) || list[0];
+  if (!list.length) return { id: 'asx-proxy', model: 'asx-proxy' };
+  if (id) {
+    const exact = list.find((c) => c.id === id || c.model === id);
+    if (exact) return exact;
+    // Claude wraps non-claude ids as claude-asx-<id>; strip if still present.
+    const stripped = id.startsWith('claude-asx-') ? id.slice('claude-asx-'.length) : id;
+    if (stripped !== id) {
+      const exact2 = list.find((c) => c.id === stripped || c.model === stripped);
+      if (exact2) return exact2;
+    }
+    const tier = detectAgentTier(id) || detectAgentTier(stripped);
+    if (tier) {
+      const picked = pickTierChoice(list, tier);
+      dlog(`[asx-models] ${provider}: alias '${id}' → tier=${tier} → ${picked.id} (${picked.model}${picked.effort ? '/' + picked.effort : ''})`);
+      return picked;
+    }
+  }
+  return list[0];
 }
 
 export type RefreshModelsOpts = {

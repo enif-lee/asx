@@ -30,11 +30,13 @@ describe('injectProxyEndpoint', () => {
     await injectProxyEndpoint('claude', env, 'http://127.0.0.1:9999', undefined, 'codex');
     // gateway discovery must be OFF (we remap slots instead of appending a gateway section)
     expect(env.CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY).toBeUndefined();
-    // codex backend first-four choices map onto Claude's opus/sonnet/haiku/fable slots
+    // codex backend first-four choices map onto Claude's opus/sonnet/haiku/fable slots.
+    // Haiku is Sol-low (not Luna) so Task subagents with model:"haiku" stay on a model
+    // the account can call.
     expect(env.ANTHROPIC_DEFAULT_OPUS_MODEL).toBe('gpt-5.6-sol-high');
     expect(env.ANTHROPIC_DEFAULT_OPUS_MODEL_NAME).toBe('gpt-5.6-sol-high');
-    expect(env.ANTHROPIC_DEFAULT_SONNET_MODEL).toBe('gpt-5.6-terra-medium');
-    expect(env.ANTHROPIC_DEFAULT_HAIKU_MODEL).toBe('gpt-5.6-luna-medium');
+    expect(env.ANTHROPIC_DEFAULT_SONNET_MODEL).toBe('gpt-5.6-sol-medium');
+    expect(env.ANTHROPIC_DEFAULT_HAIKU_MODEL).toBe('gpt-5.6-sol-low');
     expect(env.ANTHROPIC_DEFAULT_FABLE_MODEL).toBe('gpt-5.6-sol-xhigh');
     // default session model is the first backend model, not Claude's Opus
     expect(env.ANTHROPIC_MODEL).toBe('gpt-5.6-sol-high');
@@ -49,7 +51,8 @@ describe('injectProxyEndpoint', () => {
       const models = JSON.parse(fs.readFileSync(path.join(env.PI_CODING_AGENT_DIR!, 'models.json'), 'utf8'));
       const ids = models.providers['asx-proxy'].models.map((m: any) => m.id);
       expect(ids).toContain('gpt-5.6-sol-high');
-      expect(ids).toContain('gpt-5.6-terra-medium');
+      expect(ids).toContain('gpt-5.6-sol-low'); // haiku tier
+      expect(ids).toContain('gpt-5.6-terra-high');
       expect(ids).toContain('gpt-5.6-luna-medium');
       expect(ids).toContain('gpt-5.6-sol-ultra');
       expect(models.providers['asx-proxy'].baseUrl).toBe('http://127.0.0.1:4242/v1');

@@ -8,6 +8,8 @@ import {
   refreshBackendChoices,
   clearRemoteModelCache,
   grokModelsToChoices,
+  detectAgentTier,
+  pickTierChoice,
 } from './models.js';
 
 const ENV = ['ASX_CODEX_MODELS', 'ASX_GROK_MODELS', 'ASX_ZAI_MODELS', 'ASX_MODELS_CONFIG'];
@@ -19,11 +21,15 @@ afterEach(() => {
 describe('backend model choices — external config injection', () => {
   it('defaults to the built-in codex list (GPT-5.6 family + 5.5 fallback)', () => {
     const ids = backendChoices('codex').map((c) => c.id);
-    expect(ids[0]).toBe('gpt-5.6-sol-high'); // default / Claude opus slot
-    expect(ids).toContain('gpt-5.6-sol-high');
-    expect(ids).toContain('gpt-5.6-terra-medium');
+    // Claude slots / tier aliases: opus/sonnet/haiku/fable all on Sol family
+    expect(ids.slice(0, 4)).toEqual([
+      'gpt-5.6-sol-high',
+      'gpt-5.6-sol-medium',
+      'gpt-5.6-sol-low',
+      'gpt-5.6-sol-xhigh',
+    ]);
+    expect(ids).toContain('gpt-5.6-terra-high');
     expect(ids).toContain('gpt-5.6-luna-medium');
-    expect(ids).toContain('gpt-5.6-sol-xhigh');
     expect(ids).toContain('gpt-5.6-sol-ultra');
     expect(ids).toContain('gpt-5.5-high'); // still listed for compatibility
     // resolveChoice maps picker id → real upstream model + effort
@@ -33,6 +39,38 @@ describe('backend model choices — external config injection', () => {
     expect(resolveChoice('codex', 'gpt-5.6-terra-high')).toEqual({
       id: 'gpt-5.6-terra-high', model: 'gpt-5.6-terra', effort: 'high',
     });
+  });
+
+  it('maps Claude tier aliases (haiku/sonnet/opus) to lower/mid/flagship tiers', () => {
+    expect(detectAgentTier('haiku')).toBe('haiku');
+    expect(detectAgentTier('claude-haiku-4-5-20251001')).toBe('haiku');
+    expect(detectAgentTier('claude-sonnet-4-6')).toBe('sonnet');
+    expect(detectAgentTier('claude-opus-4-8')).toBe('opus');
+
+    // Subagent `model: "haiku"` must NOT land on preview-gated luna (404); use Sol-low.
+    expect(resolveChoice('codex', 'haiku')).toEqual({
+      id: 'gpt-5.6-sol-low', model: 'gpt-5.6-sol', effort: 'low',
+    });
+    expect(resolveChoice('codex', 'claude-haiku-4-5-20251001')).toEqual({
+      id: 'gpt-5.6-sol-low', model: 'gpt-5.6-sol', effort: 'low',
+    });
+    expect(resolveChoice('codex', 'sonnet').effort).toBe('medium');
+    expect(resolveChoice('codex', 'opus').model).toBe('gpt-5.6-sol');
+    expect(resolveChoice('codex', 'fable').effort).toBe('xhigh');
+
+    // Wrapped ASX ids still resolve
+    expect(resolveChoice('codex', 'claude-asx-gpt-5.6-sol-low')).toEqual({
+      id: 'gpt-5.6-sol-low', model: 'gpt-5.6-sol', effort: 'low',
+    });
+  });
+
+  it('pickTierChoice prefers low-effort default-family for haiku', () => {
+    const list = backendChoices('codex');
+    const haiku = pickTierChoice(list, 'haiku');
+    expect(haiku.model).toBe('gpt-5.6-sol');
+    expect(haiku.effort).toBe('low');
+    // Explicit luna still works via exact id (not via haiku alias)
+    expect(resolveChoice('codex', 'gpt-5.6-luna-medium').model).toBe('gpt-5.6-luna');
   });
 
   it('env ASX_<PROV>_MODELS overrides the list (model:effort)', () => {
