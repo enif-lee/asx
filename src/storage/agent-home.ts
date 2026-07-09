@@ -30,5 +30,19 @@ export function removeCrossSessionAgentHome(dir: string): void {
   if (!resolved.startsWith(`${base}${path.sep}`)) {
     throw new Error(`Refusing to remove non-cross-session home: ${dir}`);
   }
-  fs.rmSync(resolved, { recursive: true, force: true });
+  // Codex may still be flushing session files when the process exits; a single
+  // rm can race with writers and surface ENOTEMPTY even with recursive+force.
+  let lastErr: unknown;
+  for (let attempt = 0; attempt < 5; attempt++) {
+    try {
+      fs.rmSync(resolved, { recursive: true, force: true, maxRetries: 3, retryDelay: 50 });
+      return;
+    } catch (e) {
+      lastErr = e;
+      // brief busy-wait (sync) so callers stay sync; ~20ms * attempt
+      const end = Date.now() + 20 * (attempt + 1);
+      while (Date.now() < end) { /* spin */ }
+    }
+  }
+  throw lastErr;
 }

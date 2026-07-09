@@ -49,11 +49,22 @@ const SHARED: Record<string, Entry[]> = {
     { name: 'completions', type: 'dir', cat: 'settings' },
     { name: 'config.toml', type: 'file', cat: 'settings' },
   ],
+  // Pi agent dir (~/.pi/agent or $PI_CODING_AGENT_DIR): sessions tree, skills, settings.
+  // models.json + settings.json are rewritten by ASX for cross-provider proxy inject.
+  pi: [
+    { name: 'sessions', type: 'dir', cat: 'sessions' },
+    { name: 'skills', type: 'dir', cat: 'skills' },
+    { name: 'extensions', type: 'dir', cat: 'settings' },
+    { name: 'prompt-templates', type: 'dir', cat: 'settings' },
+    { name: 'themes', type: 'dir', cat: 'settings' },
+    { name: 'AGENTS.md', type: 'file', cat: 'settings' },
+    { name: 'settings.json', type: 'file', cat: 'settings' },
+  ],
 };
 
-// config.toml is provider config that asx *rewrites* for cross-provider runs (proxy
-// injection). It must never be symlinked there or we'd clobber the user's real config.
-const INJECTED_WHEN_CROSS = new Set(['config.toml']);
+// Files ASX rewrites for cross-provider runs (proxy injection). Never symlink these
+// from the system home or we would clobber the user's real config / inject target.
+const INJECTED_WHEN_CROSS = new Set(['config.toml', 'models.json', 'settings.json']);
 
 function providerKey(provider: string): string {
   const k = provider.toLowerCase();
@@ -67,6 +78,8 @@ function defaultHomeFor(provider: string): string | null {
     case 'claude': return getHomeDotDir('claude');
     case 'codex': return getHomeDotDir('codex');
     case 'grok': return getHomeDotDir('grok');
+    // Pi uses ~/.pi/agent (not ~/.pi) as the agent config home.
+    case 'pi': return path.join(getHomeDotDir('pi'), 'agent');
     default: return null;
   }
 }

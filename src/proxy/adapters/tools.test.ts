@@ -42,6 +42,20 @@ describe('formatModels (per-agent /model picker schema)', () => {
     expect(out.first_id).toBe('claude-opus-4-8');
     expect(out.last_id).toBe('claude-sonnet-4-6');
   });
+  it('pi agent reuses OpenAI chat-completions wire (same as grok agent)', async () => {
+    const { pickAgent } = await import('./index.js');
+    const pi = pickAgent('pi');
+    expect(pi).toBeTruthy();
+    // Same object as grokAgent — OpenAI Chat Completions wire
+    expect(pi).toBe(grokAgent);
+    const r = pi!.parseRequest('/v1/chat/completions', {
+      model: 'asx-proxy',
+      stream: true,
+      messages: [{ role: 'user', content: 'hi' }],
+    });
+    expect(r.messages).toEqual([{ role: 'user', content: 'hi' }]);
+    expect(r.stream).toBe(true);
+  });
   it('claude wraps non-claude backend ids so they survive the /model filter, and unwraps on request', () => {
     const out: any = claudeAgent.formatModels([{ id: 'gpt-5.5-high', model: 'gpt-5.5', effort: 'high' }, { id: 'glm-5.2', model: 'glm-5.2' }]);
     // ids must start with claude/anthropic (Claude Code drops any that don't)
@@ -71,6 +85,20 @@ describe('server toolAccumulator', () => {
       { type: 'tool_call', id: 'c0', name: 'foo', arguments: '{"a":1}' },
       { type: 'tool_call', id: 'c1', name: 'bar', arguments: '{}' },
     ]);
+  });
+  it('normalizes whole-number floats in args (Grok → Codex multi-agent i64)', () => {
+    // Regression: wait_agent timeout_ms: 30000.0 crashes Codex with
+    // "invalid type: floating point `30000.0`, expected i64".
+    const acc = toolAccumulator();
+    acc.push({
+      index: 0,
+      id: 'c0',
+      name: 'multi_agent_v1__wait_agent',
+      argsDelta: '{"agent_id":"abc","timeout_ms":30000.0}',
+    });
+    const [call] = acc.list();
+    expect(call.arguments).toBe('{"agent_id":"abc","timeout_ms":30000}');
+    expect(call.arguments).not.toContain('30000.0');
   });
   it('clear resets state', () => {
     const acc = toolAccumulator();

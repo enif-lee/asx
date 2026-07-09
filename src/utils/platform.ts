@@ -73,6 +73,17 @@ export function getGrokAuthPath(): string {
   return path.join(getGrokHome(), 'auth.json');
 }
 
+// === Pi coding agent (https://pi.dev) ===
+// Config lives under PI_CODING_AGENT_DIR (default ~/.pi/agent): auth.json, models.json, sessions/, …
+export function getPiAgentDir(): string {
+  if (process.env.PI_CODING_AGENT_DIR) return expandHome(process.env.PI_CODING_AGENT_DIR);
+  return path.join(getHomeDotDir('pi'), 'agent');
+}
+
+export function getPiAuthPath(): string {
+  return path.join(getPiAgentDir(), 'auth.json');
+}
+
 
 // Generic helper to ensure parent dir
 export function ensureDirFor(filePath: string): void {
@@ -97,4 +108,19 @@ export function getAsxAccountsPath(): string {
 // macOS stores the OAuth secret in the matching hashed Keychain service.
 export function getAsxProfilesDir(): string {
   return path.join(getAsxConfigDir(), 'profiles');
+}
+
+// Read the installed grok CLI version from ~/.grok/version.json, with a fallback
+// to a recent pinned version if the file is missing or unreadable. Used so the
+// proxy/backend headers (x-grok-client-version, User-Agent) match the real binary.
+export function getGrokVersion(): string {
+  try {
+    const vp = path.join(getGrokHome(), 'version.json');
+    if (existsSync(vp)) {
+      const d = JSON.parse(fs.readFileSync(vp, 'utf8'));
+      const v = d.version || d.stable_version;
+      if (typeof v === 'string' && v.trim()) return v.trim();
+    }
+  } catch {}
+  return '0.2.77'; // stale-but-recent fallback; bump if the proxy ever rejects it
 }

@@ -102,3 +102,18 @@ export function parseChatToolDeltas(toolCalls: any[]): CommonEvent[] {
   }
   return out;
 }
+
+// Many backends (Grok Chat Completions especially) emit whole numbers as JSON floats in the
+// tool-call arguments *text* (`"timeout_ms": 30000.0`). Strict agents like Codex deserialize
+// integer schema fields as i64 and reject that form with:
+//   failed to parse function arguments: invalid type: floating point `30000.0`, expected i64
+// A JSON.parse → JSON.stringify round-trip rewrites whole floats as bare integers
+// (`30000.0` → `30000`) while leaving true fractions and non-JSON fragments alone.
+export function normalizeToolArguments(args: string | undefined | null): string {
+  if (args == null || args === '') return args ?? '';
+  try {
+    return JSON.stringify(JSON.parse(args));
+  } catch {
+    return args; // partial/malformed stream fragment — don't touch
+  }
+}

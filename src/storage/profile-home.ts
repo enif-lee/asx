@@ -10,6 +10,7 @@ const NATIVE_CRED_FILE: Record<string, string> = {
   claude: '.credentials.json',
   codex: 'auth.json',
   grok: 'auth.json',
+  pi: 'auth.json',
 };
 
 function normalizeProviderKey(provider: string): string {

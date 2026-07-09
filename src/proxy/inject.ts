@@ -1,7 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { dlog } from '../utils/log.js';
-import { backendChoices } from './models.js';
+import { backendChoices, refreshBackendChoices } from './models.js';
 import { getAsxProfilesDir } from '../utils/platform.js';
 import { codexModelInfo } from './adapters/codex.js';
 
@@ -18,16 +18,23 @@ function fallbackAgentHome(provider: string): string {
 // Inject proxy endpoint into the isolated temp environment so the *native binary*
 // (codex or claude) talks to our local ASX proxy instead of real provider.
 // backendProvider = the profile provider; its selectable models are shown to the agent.
+// When backendCredential is set, we refresh the model list from the provider API first
+// (Grok /v1/models, Z.AI /models) so the agent picker is not stuck on hardcoded defaults.
 
 export async function injectProxyEndpoint(
   sourceProvider: string,
   env: NodeJS.ProcessEnv,
   proxyBaseUrl: string, // e.g. http://127.0.0.1:18742
   tmpDir?: string,
-  backendProvider?: string
+  backendProvider?: string,
+  backendCredential?: string,
 ): Promise<void> {
   const prov = sourceProvider.toLowerCase();
-  const choices = backendChoices(backendProvider || prov);
+  const backend = (backendProvider || prov).toLowerCase();
+  if (backendCredential) {
+    await refreshBackendChoices(backend, { credential: backendCredential });
+  }
+  const choices = backendChoices(backend);
 
   if (prov === 'codex') {
     await injectCodexProxy(tmpDir, proxyBaseUrl, env, choices.map((c) => c.id));
@@ -35,6 +42,8 @@ export async function injectProxyEndpoint(
     await injectClaudeProxy(env, proxyBaseUrl, choices.map((c) => c.id));
   } else if (prov === 'grok') {
     await injectGrokProxy(tmpDir, proxyBaseUrl, env, choices.map((c) => c.id));
+  } else if (prov === 'pi') {
+    await injectPiProxy(tmpDir, proxyBaseUrl, env, choices.map((c) => c.id));
   }
 }
 
@@ -171,5 +180,80 @@ ${entries}`;
     dlog(`[asx-proxy] base_url=${base} models=[${list.join(', ')}]`);
   } catch (e: any) {
     dlog('[asx proxy] failed to inject grok config.toml:', e?.message || e);
+  }
+}
+
+// Pi coding agent (https://pi.dev) — config under PI_CODING_AGENT_DIR (default ~/.pi/agent).
+// Cross-provider: write models.json with a single custom provider that speaks OpenAI Chat
+// Completions to the ASX proxy, plus settings.json defaultProvider/defaultModel so print
+// mode picks it without --provider flags.
+async function injectPiProxy(
+  tmpDir: string | undefined,
+  proxyBaseUrl: string,
+  env: NodeJS.ProcessEnv,
+  models: string[],
+): Promise<void> {
+  let agentDir = env.PI_CODING_AGENT_DIR as string | undefined;
+  if (!agentDir && tmpDir) agentDir = path.join(tmpDir, 'pi-agent');
+  if (!agentDir) {
+    agentDir = fallbackAgentHome('pi');
+  }
+  env.PI_CODING_AGENT_DIR = agentDir;
+  fs.mkdirSync(agentDir, { recursive: true });
+  try { fs.chmodSync(agentDir, 0o700); } catch {}
+
+  const base = proxyBaseUrl.replace(/\/+$/, '');
+  // Pi openai-completions clients append paths like /chat/completions to baseUrl;
+  // ASX proxy serves those under /v1/… so baseUrl must include /v1.
+  const baseUrl = `${base}/v1`;
+  const list = models.length ? models : ['asx-proxy'];
+  const defaultModel = list[0];
+
+  const modelsDoc = {
+    providers: {
+      'asx-proxy': {
+        baseUrl,
+        api: 'openai-completions',
+        apiKey: 'asx-proxy-dummy',
+        authHeader: true,
+        compat: {
+          supportsDeveloperRole: false,
+          supportsReasoningEffort: false,
+          supportsUsageInStreaming: false,
+        },
+        models: list.map((id) => ({
+          id,
+          name: id,
+          reasoning: false,
+          input: ['text'],
+          contextWindow: 200000,
+          maxTokens: 16384,
+          cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+        })),
+      },
+    },
+  };
+
+  const settingsDoc = {
+    defaultProvider: 'asx-proxy',
+    defaultModel,
+    // Avoid interactive trust prompts in isolated cross-provider homes.
+    defaultProjectTrust: 'always',
+  };
+
+  try {
+    const modelsPath = path.join(agentDir, 'models.json');
+    const settingsPath = path.join(agentDir, 'settings.json');
+    // Empty auth.json: models.json apiKey satisfies custom-provider auth for pi.
+    const authPath = path.join(agentDir, 'auth.json');
+    fs.writeFileSync(modelsPath, JSON.stringify(modelsDoc, null, 2), { mode: 0o600 });
+    fs.writeFileSync(settingsPath, JSON.stringify(settingsDoc, null, 2), { mode: 0o600 });
+    if (!fs.existsSync(authPath)) {
+      fs.writeFileSync(authPath, '{}', { mode: 0o600 });
+    }
+    dlog(`[asx-proxy] Injected Pi models.json at ${modelsPath}`);
+    dlog(`[asx-proxy] baseUrl=${baseUrl} defaultModel=${defaultModel} models=[${list.join(', ')}]`);
+  } catch (e: any) {
+    dlog('[asx proxy] failed to inject pi models.json:', e?.message || e);
   }
 }

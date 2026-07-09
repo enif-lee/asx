@@ -22,6 +22,7 @@ function getProviderShortName(provider: string): string {
   if (p === 'grok') return 'grok';
   if (p === 'cursor') return 'cursor';
   if (p === 'zai') return 'zai';
+  if (p === 'pi') return 'pi';
   // fallback
   return p.replace(/-code$/, '').split('-')[0];
 }
@@ -40,6 +41,9 @@ const AGENT_SPEC: Record<string, AgentSpec> = {
   codex: { bin: 'codex', homeEnv: 'CODEX_HOME', file: 'auth.json', bypass: ['--dangerously-bypass-approvals-and-sandbox', '--dangerously-bypass-hook-trust'], stub: null },
   claude: { bin: 'claude', homeEnv: 'CLAUDE_CONFIG_DIR', file: '.credentials.json', bypass: ['--dangerously-skip-permissions'], stub: () => JSON.stringify({ claudeAiOauth: { accessToken: 'asx-proxy-dummy' } }) },
   grok: { bin: 'grok', homeEnv: 'GROK_HOME', file: 'auth.json', bypass: ['--dangerously-skip-permissions'], stub: null },
+  // Pi (https://pi.dev): config under PI_CODING_AGENT_DIR (default ~/.pi/agent).
+  // Cross-provider auth is via models.json apiKey + empty auth.json stub (proxy holds real backend cred).
+  pi: { bin: 'pi', homeEnv: 'PI_CODING_AGENT_DIR', file: 'auth.json', bypass: [], stub: () => '{}' },
 };
 const agentSpec = (provider: string): AgentSpec | undefined => AGENT_SPEC[provider.includes('claude') ? 'claude' : provider];
 const isAgentProvider = (provider: string): boolean => !!agentSpec(provider);
@@ -146,7 +150,7 @@ const program = new Command();
 
 program
   .name('asx')
-  .description('Multi-account LLM provider switcher (claude, codex, zai, grok, cursor). Credentials live in provider-native profile stores. (renamed from "as" to avoid conflict with LLVM as)')
+  .description('Multi-account LLM provider switcher (claude, codex, zai, grok, cursor, pi). Credentials live in provider-native profile stores. (renamed from "as" to avoid conflict with LLVM as)')
   .version('0.3.0');
 
 program
@@ -676,8 +680,8 @@ program
     if (!acct) { console.error(chalk.red(`No account found with name "${name}"`)); process.exit(1); }
     const backendProvider = acct.provider;
     const frontendProvider = (provIndex.normalizeProvider(frontend) || frontend.toLowerCase());
-    if (!['claude', 'codex', 'grok'].includes(frontendProvider)) {
-      console.error(chalk.red(`Unsupported frontend '${frontend}'. Use claude, codex, or grok.`)); process.exit(1);
+    if (!['claude', 'codex', 'grok', 'pi'].includes(frontendProvider)) {
+      console.error(chalk.red(`Unsupported frontend '${frontend}'. Use claude, codex, grok, or pi.`)); process.exit(1);
     }
 
     // Refresh the backend credential if expired, then load it.
@@ -699,7 +703,7 @@ program
     // which env vars to export to use it. The config is regenerated each run.
     const dir = agentScratchHome(frontendProvider, name);
     const injected: NodeJS.ProcessEnv = {};
-    await injectProxyEndpoint(frontendProvider, injected, url, dir, backendProvider);
+    await injectProxyEndpoint(frontendProvider, injected, url, dir, backendProvider, backendCred);
 
     console.log(chalk.green(`\nASX proxy running: ${chalk.bold(url)}`));
     console.log(chalk.gray(`  backend  = ${backendProvider}/${name}`));
@@ -711,6 +715,7 @@ program
     if (frontendProvider === 'codex') console.log(chalk.gray(`  then run: codex   (uses the injected CODEX_HOME config)`));
     else if (frontendProvider === 'grok') console.log(chalk.gray(`  then run: grok    (uses the injected GROK_HOME config)`));
     else if (frontendProvider === 'claude') console.log(chalk.gray(`  then run: claude  (uses ANTHROPIC_BASE_URL)`));
+    else if (frontendProvider === 'pi') console.log(chalk.gray(`  then run: pi      (uses the injected PI_CODING_AGENT_DIR models.json)`));
     console.log(chalk.gray(`\n  or call directly, e.g.:  curl ${url}/v1/... `));
     console.log(chalk.yellow(`\nPress Ctrl+C to stop.`));
 
@@ -912,7 +917,9 @@ program
         if (proxyHandle?.url) {
           // The agent's home (already set as env[spec.homeEnv]) is where codex/grok
           // proxy config.toml is written; injectClaudeProxy uses env vars only.
-          await injectProxyEndpoint(agentProvider, env, proxyHandle.url, env[spec.homeEnv], profileProvider);
+          // Pass backendCred so inject can refresh the live model list (Grok /v1/models)
+          // into the agent picker instead of the hardcoded grok-build default.
+          await injectProxyEndpoint(agentProvider, env, proxyHandle.url, env[spec.homeEnv], profileProvider, backendCred);
         }
       }
 

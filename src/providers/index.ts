@@ -3,6 +3,7 @@ import { claudeCodeAdapter } from './claude-code.js';
 import { createKeyAdapter } from './key-adapter.js';
 import { codexAdapter } from './codex.js';
 import { cursorAdapter } from './cursor.js';
+import { piAdapter } from './pi.js';
 
 // Registry
 const adapters: Record<string, ProviderAdapter> = {
@@ -12,6 +13,7 @@ const adapters: Record<string, ProviderAdapter> = {
   'zai': createKeyAdapter('zai'),
   'grok': createKeyAdapter('grok'),
   'cursor': cursorAdapter,
+  'pi': piAdapter,
 };
 
 export function getAdapter(name: string): ProviderAdapter {
@@ -26,7 +28,7 @@ export function listKnownProviders(): string[] {
 }
 
 // For proxy target resolution and cross detection
-export const KNOWN_TARGET_PROVIDERS = ['claude', 'codex', 'grok', 'zai', 'xai', 'openai'] as const;
+export const KNOWN_TARGET_PROVIDERS = ['claude', 'codex', 'grok', 'zai', 'xai', 'openai', 'pi'] as const;
 export type KnownTarget = typeof KNOWN_TARGET_PROVIDERS[number];
 
 export function normalizeProvider(p: string | undefined): string | undefined {

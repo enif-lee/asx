@@ -1,9 +1,12 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, afterEach } from 'vitest';
 import { grokAgent, grokBackend } from './grok.js';
 import { codexAgent, codexBackend } from './codex.js';
 import { claudeAgent, claudeBackend } from './claude.js';
 import { zaiBackend, isZaiOverload } from './zai.js';
+import { clearRemoteModelCache, refreshBackendChoices } from '../models.js';
 import type { StreamCtx, CommonEvent } from '../types.js';
+
+afterEach(() => clearRemoteModelCache());
 
 const ctx = (model = 'm'): StreamCtx => ({ id: 'id1', created: 1, model, first: true });
 const stream = (a: any, evs: CommonEvent[]) => {
@@ -49,10 +52,28 @@ describe('codex backend (Responses wire)', () => {
     expect(b.input.every((m: any) => m.role !== 'system')).toBe(true);
   });
   it('maps the picked choice id to model + effort', () => {
-    const { body } = codexBackend.buildRequest({ model: 'gpt-5.5-low', messages: [], stream: true } as any, '{}');
+    const { body } = codexBackend.buildRequest({ model: 'gpt-5.6-sol-xhigh', messages: [], stream: true } as any, '{}');
     const b = JSON.parse(body);
-    expect(b.model).toBe('gpt-5.5');
-    expect(b.reasoning.effort).toBe('low');
+    expect(b.model).toBe('gpt-5.6-sol');
+    expect(b.reasoning.effort).toBe('xhigh');
+  });
+  it('maps terra/luna choice ids to the correct upstream model strings', () => {
+    const terra = JSON.parse(codexBackend.buildRequest(
+      { model: 'gpt-5.6-terra-high', messages: [], stream: true } as any, '{}',
+    ).body);
+    expect(terra.model).toBe('gpt-5.6-terra');
+    expect(terra.reasoning.effort).toBe('high');
+    const luna = JSON.parse(codexBackend.buildRequest(
+      { model: 'gpt-5.6-luna-max', messages: [], stream: true } as any, '{}',
+    ).body);
+    expect(luna.model).toBe('gpt-5.6-luna');
+    expect(luna.reasoning.effort).toBe('max');
+    // 5.5 still resolves for backward compat
+    const legacy = JSON.parse(codexBackend.buildRequest(
+      { model: 'gpt-5.5-low', messages: [], stream: true } as any, '{}',
+    ).body);
+    expect(legacy.model).toBe('gpt-5.5');
+    expect(legacy.reasoning.effort).toBe('low');
   });
   it('extractAuth tolerates a bare token (no JSON)', () => {
     const { headers } = codexBackend.buildRequest({ model: 'x', messages: [], stream: true } as any, 'bare-token');

@@ -72,6 +72,54 @@ function Get-PackageManager {
   Fail "npm or pnpm is required."
 }
 
+function Test-AsxPackage($PackagePath) {
+  if (-not (Has-Command "tar")) { Fail "tar is required to verify ASX package artifacts." }
+  $entries = & tar -tzf $PackagePath
+  if ($LASTEXITCODE -ne 0) { Fail "failed to inspect ASX package artifact." }
+  if (-not ($entries -contains "package/dist/cli.js")) {
+    Fail "downloaded ASX package is missing dist/cli.js. The release artifact is incomplete."
+  }
+}
+
+function Build-SourcePackage($SourcePath, $TempDir) {
+  if (-not (Has-Command "tar")) { Fail "tar is required to install ASX from a source release." }
+  if (-not (Has-Command "npm")) { Fail "npm is required to build ASX from a source release." }
+
+  $buildDir = Join-Path $TempDir "source"
+  $packDir = Join-Path $TempDir "pack"
+  New-Item -ItemType Directory -Force -Path $buildDir, $packDir | Out-Null
+
+  & tar -xzf $SourcePath -C $buildDir
+  if ($LASTEXITCODE -ne 0) { Fail "failed to unpack ASX source release." }
+
+  $sourceDir = Get-ChildItem -Path $buildDir -Directory | Select-Object -First 1
+  if (-not $sourceDir) { Fail "failed to unpack ASX source release." }
+
+  Write-Step "No release package asset found; building ASX from source..."
+  Push-Location $sourceDir.FullName
+  try {
+    if (Test-Path "package-lock.json") {
+      & npm ci
+    } else {
+      & npm install
+    }
+    if ($LASTEXITCODE -ne 0) { Fail "npm install failed while building ASX from source." }
+
+    & npm run build
+    if ($LASTEXITCODE -ne 0) { Fail "npm build failed while building ASX from source." }
+
+    & npm pack --pack-destination $packDir --ignore-scripts | Out-Null
+    if ($LASTEXITCODE -ne 0) { Fail "npm pack failed while building ASX from source." }
+  } finally {
+    Pop-Location
+  }
+
+  $builtPackage = Get-ChildItem -Path $packDir -Filter "asx-*.tgz" -File | Select-Object -First 1
+  if (-not $builtPackage) { Fail "failed to build ASX package from source." }
+  Test-AsxPackage $builtPackage.FullName
+  return $builtPackage.FullName
+}
+
 function Get-ReleasePackage {
   if ($env:ASX_INSTALL_TARGET) {
     if (Test-Path $env:ASX_INSTALL_TARGET) {
@@ -91,21 +139,32 @@ function Get-ReleasePackage {
   if (-not $asset) {
     $asset = $release.assets | Where-Object { $_.name -match '\.tgz$' } | Select-Object -First 1
   }
-  if (-not $asset) {
-    Fail "no asx .tgz release asset found for $($release.tag_name)."
+
+  $tempDir = Join-Path ([IO.Path]::GetTempPath()) "asx-install-$PID"
+  New-Item -ItemType Directory -Force -Path $tempDir | Out-Null
+
+  if ($asset) {
+    $packagePath = Join-Path $tempDir $asset.name
+    if ($GithubToken) {
+      $downloadHeaders = @{
+        Authorization = "Bearer $GithubToken"
+        Accept = "application/octet-stream"
+      }
+      Invoke-WebRequest -Uri $asset.url -Headers $downloadHeaders -OutFile $packagePath
+    } else {
+      Invoke-WebRequest -Uri $asset.browser_download_url -OutFile $packagePath
+    }
+    Test-AsxPackage $packagePath
+    return $packagePath
   }
 
-  $packagePath = Join-Path ([IO.Path]::GetTempPath()) $asset.name
-  if ($GithubToken) {
-    $downloadHeaders = @{
-      Authorization = "Bearer $GithubToken"
-      Accept = "application/octet-stream"
-    }
-    Invoke-WebRequest -Uri $asset.url -Headers $downloadHeaders -OutFile $packagePath
-  } else {
-    Invoke-WebRequest -Uri $asset.browser_download_url -OutFile $packagePath
+  if (-not $release.tarball_url) {
+    Fail "no ASX package asset or source archive found for $($release.tag_name)."
   }
-  return $packagePath
+
+  $sourcePath = Join-Path $tempDir "asx-source.tgz"
+  Invoke-WebRequest -Uri $release.tarball_url -Headers $GithubHeaders -OutFile $sourcePath
+  return Build-SourcePackage $sourcePath $tempDir
 }
 
 if ((-not (Test-Node)) -or (-not (Test-PackageManager))) {

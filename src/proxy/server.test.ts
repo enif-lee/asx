@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { forEachUpstreamEvent, startProxy, fetchUpstreamWithRetry } from './server.js';
+import { forEachUpstreamEvent, startProxy, fetchUpstreamWithRetry, estimateAnthropicInputTokens } from './server.js';
 import { zaiBackend } from './adapters/zai.js';
 import type { CommonEvent } from './types.js';
 
@@ -112,7 +112,55 @@ describe('fetchUpstreamWithRetry', () => {
   });
 });
 
+describe('estimateAnthropicInputTokens', () => {
+  it('estimates from message text and never returns 0 for non-empty bodies', () => {
+    const n = estimateAnthropicInputTokens(JSON.stringify({
+      model: 'x',
+      messages: [{ role: 'user', content: 'abcd' }], // 4 chars -> 1 token
+    }));
+    expect(n).toBe(1);
+    expect(estimateAnthropicInputTokens('{"messages":[]}')).toBe(1);
+  });
+});
+
 describe('proxy metadata endpoints', () => {
+  it('returns {input_tokens} for Claude count_tokens instead of running inference', async () => {
+    // Regression: a loose /messages/ match routed count_tokens into chat completion,
+    // which returned a Message body and burned a Grok call. Claude Code expects
+    // { input_tokens: number } (token-counting-2024-11-01).
+    let fetchCalls = 0;
+    const originalFetch = globalThis.fetch;
+    (globalThis as any).fetch = async () => {
+      fetchCalls++;
+      return new Response('should-not-be-called', { status: 500 });
+    };
+    // Use a backend with no remote models API so startProxy itself does not fetch.
+    const proxy = await startProxy({
+      sourceProvider: 'claude',
+      targetProvider: 'codex',
+      targetCredential: { raw: 'codex-token' },
+    });
+    try {
+      const res = await originalFetch(`${proxy.url}/v1/messages/count_tokens`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({
+          model: 'gpt-5.5-high',
+          messages: [{ role: 'user', content: 'hello world token count' }],
+        }),
+      });
+      const body: any = await res.json();
+      expect(res.status).toBe(200);
+      expect(body).toEqual({ input_tokens: expect.any(Number) });
+      expect(body.input_tokens).toBeGreaterThan(0);
+      expect(body.type).toBeUndefined(); // must NOT be a Message
+      expect(fetchCalls).toBe(0); // no upstream call
+    } finally {
+      proxy.stop();
+      globalThis.fetch = originalFetch;
+    }
+  });
+
   it('serves backend model choices on /v1/models in the agent wire schema', async () => {
     // codex agent -> codex ModelInfo schema ({ models: [{ slug, ... }] })
     const codex = await startProxy({ sourceProvider: 'codex', targetProvider: 'zai', targetCredential: { raw: 'zai-key' } });

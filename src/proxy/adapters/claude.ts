@@ -101,11 +101,18 @@ export const claudeAgent: AgentAdapter = {
     }
     // done or error: surface error text, ensure at least one block, then close the message.
     if (ev.type === 'error') { out += openText(); out += anthEvent('content_block_delta', { type: 'content_block_delta', index: ctx.textIndex, delta: { type: 'text_delta', text: `[asx-proxy] ${ev.message}` } }); }
-    if (!ctx.textOpen && !ctx.items!.length) out += openText();
+    // Empty end_turn (backend returned only finish_reason / reasoning) still needs a text
+    // block so Claude Code's print-mode agent loop materializes a result message. Without
+    // any content block the stream is valid Anthropic SSE but Claude Code often exits with
+    // unhandled "No messages returned" after Task/subagent turns.
+    if (!ctx.textOpen && !ctx.items!.length) {
+      out += openText();
+      out += anthEvent('content_block_delta', { type: 'content_block_delta', index: ctx.textIndex, delta: { type: 'text_delta', text: '' } });
+    }
     out += closeText();
     const stopReason = ctx.items!.length ? 'tool_use' : 'end_turn';
     return out
-      + anthEvent('message_delta', { type: 'message_delta', delta: { stop_reason: stopReason }, usage: { output_tokens: 0 } })
+      + anthEvent('message_delta', { type: 'message_delta', delta: { stop_reason: stopReason, stop_sequence: null }, usage: { output_tokens: 0 } })
       + anthEvent('message_stop', { type: 'message_stop' });
   },
   formatResponse(resp: CommonResponse, _req: CommonRequest) {

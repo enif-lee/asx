@@ -50,6 +50,18 @@ jobs:
       - run: mkdir -p release
       - run: npm pack --pack-destination release --ignore-scripts
 
+      - name: Verify release package
+        shell: bash
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          packages=(release/asx-*.tgz)
+          if [[ ${#packages[@]} -ne 1 ]]; then
+            echo "Expected exactly one ASX package in release/, found ${#packages[@]}." >&2
+            exit 1
+          fi
+          tar -tzf "${packages[0]}" | grep -qx 'package/dist/cli.js'
+
       - name: Create and push tag
         shell: bash
         run: |

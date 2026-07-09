@@ -7,6 +7,9 @@ import { zaiBackend } from './zai.js';
 
 const AGENTS: Record<string, AgentAdapter> = {
   grok: grokAgent,
+  // Pi coding agent (https://pi.dev) speaks OpenAI Chat Completions via models.json
+  // custom providers (`api: "openai-completions"`). Reuse the grok agent wire adapter.
+  pi: grokAgent,
   codex: codexAgent,
   claude: claudeAgent,
 };

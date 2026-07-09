@@ -70,7 +70,7 @@ export const codexBackend: BackendAdapter = {
     const sys = [req.system, ...req.messages.filter((m) => m.role === 'system').map((m) => m.content)]
       .filter(Boolean).join('\n');
     const input = messagesToInput(req.messages);
-    // The agent sends the picked choice id (e.g. "gpt-5.5-high") as the model.
+    // The agent sends the picked choice id (e.g. "gpt-5.6-sol-high") as the model.
     const choice = resolveChoice('codex', req.model);
     const tools = toResponsesTools(req.tools);
     const body = {
@@ -311,10 +311,15 @@ export const codexAgent: AgentAdapter = {
   },
 };
 
+// Include xhigh/max/ultra so GPT-5.6 catalog entries (Sol/Terra/Luna) advertise the
+// same effort ladder Codex's own models_cache.json uses.
 const REASONING_LEVELS = [
   { effort: 'low', description: 'Fast responses with lighter reasoning' },
   { effort: 'medium', description: 'Balances speed and reasoning depth' },
   { effort: 'high', description: 'Greater reasoning depth for complex problems' },
+  { effort: 'xhigh', description: 'Extra-high reasoning for hard multi-step work' },
+  { effort: 'max', description: 'Maximum reasoning budget' },
+  { effort: 'ultra', description: 'Ultra reasoning (Sol/Terra)' },
 ];
 
 export function codexModelInfo(slug: string, priority = 0, opts: { effort?: string; provider?: string; hidden?: boolean } = {}) {

@@ -1,9 +1,9 @@
 import fs from 'node:fs';
 import { setSecret, getSecret } from '../storage/secure-store.js';
-import { addAccount, setActive } from '../storage/account-store.js';
+import { addAccount, setActive, getAccount } from '../storage/account-store.js';
 import { renderBar } from '../utils/bar.js';
 import { decodeJwtClaims } from '../utils/jwt.js';
-import { ensureDirFor, getGrokAuthPath } from '../utils/platform.js';
+import { ensureDirFor, getGrokAuthPath, getGrokVersion } from '../utils/platform.js';
 import type { ProviderAdapter } from './base.js';
 
 const ZAI_BASE_URL = 'https://api.z.ai/api/coding/paas/v4';
@@ -71,6 +71,61 @@ function tryExtractGrokEmail(): string | undefined {
 function parseGrokTokenInfo(token: string): any {
   if (!token || !token.startsWith('ey')) return null;
   return decodeJwtClaims(token);
+}
+
+// Extract the grok OIDC auth entry (object with key/refresh_token/oidc_*) from a
+// stored secret string. Supports both the bare-key form ("ey..." / "{\"key\":...}")
+// and the grok auth.json wrapper ({ "<issuer>::<uuid>": { ... } }).
+function grokEntryFromRaw(raw: string): any | undefined {
+  const data = parseJson(raw);
+  if (!data || typeof data !== 'object' || Array.isArray(data)) {
+    // Bare JWT / plain string — no refresh_token available.
+    return undefined;
+  }
+  if (data.key && typeof data.key === 'string') return data;
+  const entry = Object.values(data).find((v: any) => v && typeof v === 'object' && typeof v.key === 'string') as any;
+  return entry;
+}
+
+// grok CLI refresh grant: POST https://<issuer>/oauth2/token with grant_type=refresh_token.
+// Verified wire (grok 0.2.82): form-encoded body, returns { access_token, refresh_token,
+// token_type, expires_in, scope }. Requires the grok-cli client headers or Cloudflare rejects.
+// Returns { token, refreshToken, expiresIn } on success, or null on failure.
+async function grokRefreshGrant(entry: any): Promise<{ token: string; refreshToken: string; expiresIn: number } | null> {
+  const refreshToken = entry?.refresh_token;
+  if (typeof refreshToken !== 'string' || !refreshToken) return null;
+  const issuer = entry.oidc_issuer || 'https://auth.x.ai';
+  const clientId = entry.oidc_client_id;
+  if (!clientId) return null;
+  const version = getGrokVersion();
+  let res: Response;
+  try {
+    res = await fetch(`${issuer}/oauth2/token`, {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/x-www-form-urlencoded',
+        'x-grok-client-version': version,
+        'x-grok-client-surface': 'grok-build',
+        'x-grok-client-identifier': 'grok-shell',
+        'User-Agent': `grok-shell/${version} (macos; aarch64)`,
+      },
+      body: new URLSearchParams({
+        grant_type: 'refresh_token',
+        refresh_token: refreshToken,
+        client_id: clientId,
+      }),
+    });
+  } catch {
+    return null; // network error — transient
+  }
+  if (!res.ok) return null;
+  const j: any = await res.json().catch(() => null);
+  if (!j || typeof j.access_token !== 'string') return null;
+  return {
+    token: j.access_token,
+    refreshToken: typeof j.refresh_token === 'string' ? j.refresh_token : refreshToken,
+    expiresIn: typeof j.expires_in === 'number' ? j.expires_in : 21600,
+  };
 }
 
 function parsePercent(value: any): number | null {
@@ -328,6 +383,74 @@ export function createKeyAdapter(provider: string): ProviderAdapter {
     getLoginCommand() {
       if (provider === 'grok') return ['grok', 'login'];
       return null;
+    },
+
+    // grok OIDC accounts store a JWT (key) + refresh_token. Detect expiry from the
+    // JWT exp claim (60s skew), like the codex/claude adapters. Pure API keys
+    // (no refresh path) are treated as never-expiring.
+    async isExpired(accountName?: string) {
+      if (provider !== 'grok') return false;
+      const raw = await getSecret(provider, accountName || '');
+      if (!raw) return false;
+      const entry = grokEntryFromRaw(raw);
+      if (entry?.refresh_token) {
+        const claims = decodeJwtClaims(entry.key);
+        return !!claims && typeof claims.exp === 'number' && claims.exp * 1000 < Date.now() + 60_000;
+      }
+      return false; // bare API key — no expiry
+    },
+
+    // Refresh a grok OIDC account using its stored refresh_token. Mirrors the
+    // claude-code adapter direct OAuth grant (no native binary needed). On
+    // success, the rotated access_token/refresh_token/expires_at are written back
+    // to the asx vault (preserving the original issuer-keyed wrapper), and pushed
+    // to the native ~/.grok/auth.json if it holds this account's old credential.
+    async refresh(accountName?: string) {
+      if (provider !== 'grok') return { ok: true, message: 'no refresh needed (api key)' };
+      const name = accountName || '';
+      const raw = await getSecret(provider, name);
+      if (!raw) return { ok: false, message: 'no stored credential' };
+      const data = parseJson(raw);
+      const entry = grokEntryFromRaw(raw);
+      if (!entry?.refresh_token) return { ok: false, message: 'no refresh token stored', needsRelogin: true };
+
+      const refreshed = await grokRefreshGrant(entry);
+      if (!refreshed) {
+        // Could be transient (network) or permanent (revoked refresh token). We can't
+        // always tell, so surface a hint to re-login if it keeps failing.
+        return { ok: false, message: 'refresh failed (network or revoked refresh token)', needsRelogin: true };
+      }
+
+      // Build the updated entry, then re-wrap using the same structure as the stored secret.
+      const updatedEntry: any = { ...entry, key: refreshed.token, refresh_token: refreshed.refreshToken };
+      // Update expires_at (ISO 8601, UTC with Z) so isExpired/expires checks stay consistent.
+      updatedEntry.expires_at = new Date(Date.now() + refreshed.expiresIn * 1000).toISOString();
+
+      let newRaw: string;
+      if (data && typeof data === 'object' && !Array.isArray(data) && !data.key) {
+        // Issuer-keyed wrapper { "<issuer>::<uuid>": entry } — replace the matching entry in place.
+        const wrapperKey = Object.keys(data).find((k) => data[k] === entry) || Object.keys(data)[0];
+        newRaw = JSON.stringify({ ...data, [wrapperKey]: updatedEntry });
+      } else {
+        // { key, ... } flat form.
+        newRaw = JSON.stringify(updatedEntry);
+      }
+      await setSecret(provider, name, newRaw);
+
+      // System profiles use the shared ~/.grok/auth.json as their home (the native grok
+      // binary reads it directly), so a refresh must write back there too. Isolated
+      // profiles own a separate profile home and must not touch the system file.
+      let syncedNative = false;
+      try {
+        const acc = getAccount(provider, name);
+        const isSystem = acc?.profileType === 'system';
+        if (isSystem) {
+          writeGrokAuth(newRaw);
+          syncedNative = true;
+        }
+      } catch {}
+
+      return { ok: true, message: `refreshed (expires ${updatedEntry.expires_at})${syncedNative ? ' [native synced]' : ''}` };
     },
   };
 }

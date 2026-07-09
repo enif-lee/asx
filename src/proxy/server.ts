@@ -2,7 +2,8 @@ import http from 'node:http';
 import { randomUUID } from 'node:crypto';
 import type { ProxyHandle, ProxyStartOptions, CommonEvent, StreamCtx } from './types.js';
 import { pickAgent, pickBackend } from './adapters/index.js';
-import { backendChoices } from './models.js';
+import { normalizeToolArguments } from './adapters/util.js';
+import { backendChoices, refreshBackendChoices } from './models.js';
 import { dlog } from '../utils/log.js';
 
 // Short-lived in-process proxy for one exec session.
@@ -15,15 +16,33 @@ export async function startProxy(options: ProxyStartOptions): Promise<ProxyHandl
   const backendProvider = options.targetProvider.toLowerCase();
   const cred = options.targetCredential?.raw || options.targetCredential?.apiKey || '';
 
+  // Prefetch live model list (Grok/ZAI) so GET /v1/models and resolveChoice are not stuck
+  // on hardcoded defaults for this session.
+  if (cred) {
+    try { await refreshBackendChoices(backendProvider, { credential: cred }); }
+    catch (e: any) { dlog(`[asx-proxy] model refresh failed: ${e?.message || e}`); }
+  }
+
   const agent = pickAgent(agentProvider);
   const backend = pickBackend(backendProvider);
 
   const server = http.createServer(async (req, res) => {
     const reqId = randomUUID().slice(0, 8);
     const urlPath = (req.url || '').split('?')[0];
-    const isInference = req.method === 'POST' && /\/(v1\/)?(responses|messages|chat\/completions|completions)/.test(urlPath);
+    // Exact inference endpoints only. A loose /messages/ match would also swallow Claude Code's
+    // POST /v1/messages/count_tokens (token-counting-2024-11-01), which must return
+    // { input_tokens } — not a chat completion. Mis-routing that path runs a real Grok call
+    // and returns a Message shape; Claude Code then fails mid-session (often as
+    // unhandled "No messages returned" after Task/subagent work).
+    const isCountTokens = req.method === 'POST' && /\/(v1\/)?messages\/count_tokens\/?$/.test(urlPath);
+    const isInference = req.method === 'POST' && (
+      /\/(v1\/)?responses\/?$/.test(urlPath)
+      || /\/(v1\/)?messages\/?$/.test(urlPath)
+      || /\/(v1\/)?chat\/completions\/?$/.test(urlPath)
+      || /\/(v1\/)?completions\/?$/.test(urlPath)
+    );
     const isModels = req.method === 'GET' && /\/(v1\/)?models\/?$/.test(urlPath);
-    dlog(`[asx-proxy] ${req.method} ${urlPath} (agent=${agentProvider}->backend=${backendProvider}, id=${reqId}${isInference ? ', inference' : ''})`);
+    dlog(`[asx-proxy] ${req.method} ${urlPath} (agent=${agentProvider}->backend=${backendProvider}, id=${reqId}${isInference ? ', inference' : isCountTokens ? ', count_tokens' : ''})`);
 
     // Track whether the client (agent) has closed the response early so we can
     // cancel the upstream stream instead of reading it into a dead socket.
@@ -42,6 +61,18 @@ export async function startProxy(options: ProxyStartOptions): Promise<ProxyHandl
           : { object: 'list', data: choices.map((m) => ({ id: m.id, object: 'model', created: 0, owned_by: `asx-${backendProvider}` })) };
         res.writeHead(200, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify(bodyOut));
+        return;
+      }
+
+      // Claude Code (and the Anthropic SDK) POST /v1/messages/count_tokens and expect
+      // { input_tokens: number }. Backends don't share this wire, so estimate locally —
+      // accuracy only matters for UI meters / budget gates, not for inference quality.
+      if (isCountTokens) {
+        const rawBody = await readBody(req);
+        const inputTokens = estimateAnthropicInputTokens(rawBody);
+        dlog(`[asx-proxy] count_tokens ~${inputTokens}`);
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ input_tokens: inputTokens }));
         return;
       }
 
@@ -172,6 +203,38 @@ export async function startProxy(options: ProxyStartOptions): Promise<ProxyHandl
   return { url, port, stop: () => { try { server.close(); } catch {} } };
 }
 
+// Rough Anthropic-compatible token estimate for count_tokens stubs.
+// Prefer a stable, cheap heuristic over calling the backend: Claude Code uses this for
+// context meters and pre-flight budget checks, not for billing.
+export function estimateAnthropicInputTokens(rawBody: string): number {
+  if (!rawBody) return 0;
+  try {
+    const body = JSON.parse(rawBody);
+    // Sum system + message content text; fall back to raw length.
+    let chars = 0;
+    const add = (v: unknown) => {
+      if (typeof v === 'string') chars += v.length;
+      else if (Array.isArray(v)) for (const b of v) {
+        if (typeof b === 'string') chars += b.length;
+        else if (b && typeof b === 'object') {
+          if (typeof (b as any).text === 'string') chars += (b as any).text.length;
+          else if (typeof (b as any).content === 'string') chars += (b as any).content.length;
+          else chars += JSON.stringify(b).length;
+        }
+      } else if (v && typeof v === 'object') chars += JSON.stringify(v).length;
+    };
+    add(body.system);
+    if (Array.isArray(body.messages)) for (const m of body.messages) add(m?.content);
+    if (Array.isArray(body.tools)) chars += JSON.stringify(body.tools).length;
+    // ~4 chars/token is the usual English heuristic; clamp so empty-ish bodies still return >0
+    // when any payload was present (Claude Code treats 0 as "unknown/failed" in some paths).
+    const tokens = Math.max(1, Math.ceil(chars / 4));
+    return tokens;
+  } catch {
+    return Math.max(1, Math.ceil(rawBody.length / 4));
+  }
+}
+
 // Read an upstream SSE body, frame it on blank-line boundaries, and emit each COMMON
 // event. Normalizes CRLF, flushes the decoder at end (no truncated multi-byte UTF-8),
 // and always releases the reader. The optional `isCancelled` callback lets the caller
@@ -213,6 +276,8 @@ export async function forEachUpstreamEvent(
 
 // Merge streamed tool_call_delta fragments (keyed by wire index) into complete tool calls,
 // preserving first-seen order. id/name land on the opening fragment; args arrive in pieces.
+// Finalized arguments pass through normalizeToolArguments so backend float-style integers
+// (e.g. Grok's `timeout_ms: 30000.0`) become agent-safe integer JSON for Codex multi-agent.
 export function toolAccumulator() {
   const byIndex = new Map<number, { id: string; name: string; args: string }>();
   const order: number[] = [];
@@ -227,7 +292,7 @@ export function toolAccumulator() {
     list(): Array<CommonEvent & { type: 'tool_call' }> {
       return order.map((i) => {
         const t = byIndex.get(i)!;
-        return { type: 'tool_call' as const, id: t.id, name: t.name, arguments: t.args };
+        return { type: 'tool_call' as const, id: t.id, name: t.name, arguments: normalizeToolArguments(t.args) };
       });
     },
     clear() { byIndex.clear(); order.length = 0; },

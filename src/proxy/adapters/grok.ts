@@ -7,6 +7,7 @@
 import type { AgentAdapter, BackendAdapter, CommonRequest, CommonEvent, CommonResponse, StreamCtx } from '../types.js';
 import { resolveChoice } from '../models.js';
 import { sseData as sse, sseHeaders, toText, chatMessagesFromCommon, chatToolsFromCommon, chatMessagesToCommon, chatToolsToCommon, parseChatToolDeltas } from './util.js';
+import { getGrokVersion } from '../../utils/platform.js';
 
 export const grokAgent: AgentAdapter = {
   parseRequest(_path, body): CommonRequest {
@@ -75,9 +76,6 @@ export const grokAgent: AgentAdapter = {
 // Verified contract (grok 0.2.77): needs client-version + token-auth headers, streaming only,
 // and grok-build emits `reasoning_content` deltas before the real `content` deltas.
 const GROK_URL = 'https://cli-chat-proxy.grok.com/v1/chat/completions';
-// ponytail: pinned to the installed grok version; bump if the proxy rejects it. Upgrade path =
-// read ~/.grok/version.json, but a stale-but-recent version is accepted so a constant is fine.
-const GROK_VERSION = '0.2.77';
 
 function grokToken(cred: string): string {
   // stored secret is either the bare JWT or a grok auth.json wrapper { "<issuer>": { key } }
@@ -87,8 +85,12 @@ function grokToken(cred: string): string {
 export const grokBackend: BackendAdapter = {
   buildRequest(req: CommonRequest, cred: string) {
     const choice = resolveChoice('grok', req.model);
+    const GROK_VERSION = getGrokVersion();
     const messages = chatMessagesFromCommon(req.system, req.messages);
     const body: any = { model: choice.model, messages, stream: true };
+    // Models that advertise reasoning_efforts (e.g. grok-4.5) accept reasoning_effort
+    // on the chat-completions wire; effort-expanded picker ids map here.
+    if (choice.effort) body.reasoning_effort = choice.effort;
     const tools = chatToolsFromCommon(req.tools);
     if (tools) {
       body.tools = tools;

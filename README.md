@@ -10,10 +10,10 @@ Store each profile's credential in its own `0600` home directory and switch betw
 
 ## ✨ Features
 
-- **Multiple accounts, one workflow**: Keep work, personal, and team accounts for Claude Code, Codex, Grok, Z.AI, and other providers.
+- **Multiple accounts, one workflow**: Keep work, personal, and team accounts for Claude Code, Codex, Grok, Z.AI, Pi, and other providers.
 - **Fast account switching**: Make a saved profile active with `asx switch` and keep `asx list` honest about what is currently loaded.
 - **One-off profile runs**: Run an agent with a selected profile without changing other terminals or your default login.
-- **Cross-provider execution**: Use one agent UI with another provider backend, such as running Codex while routing requests to Claude, Grok, or Z.AI. Tool calling, session continuity, and Codex multi-agent subagents (`spawn_agent`/collab) work across providers.
+- **Cross-provider execution**: Use one agent UI with another provider backend, such as running Codex or Pi while routing requests to Claude, Grok, or Z.AI. Tool calling, session continuity, and Codex multi-agent subagents (`spawn_agent`/collab) work across providers.
 - **Per-profile sharing control**: Choose per profile which state (sessions, skills, agents, hooks, settings) is shared with the provider's system home and which stays isolated.
 - **Usage at a glance**: Show live quota, credits, and rate-limit information with `asx list -u`.
 - **Safer login management**: Save existing sessions before new logins, load current sessions into profiles, and keep each profile's credential in its own `0600` file.
@@ -82,10 +82,16 @@ asx e ed.claude codex "run Codex UI on the Claude backend"
 asx e ed.codex claude "run Claude Code on the Codex backend"
 asx e ed.claude xai "run Grok UI on the Claude backend (xai = grok alias)"
 asx e personal.zai codex "run Codex UI on the ZAI backend"
+asx e yano2413.grok pi -p "run Pi UI on the Grok backend"
 
 # Control what the cross-provider run shares with the agent's system home
 asx e personal.zai codex -i "fully isolated run"
 asx e personal.zai codex --share sessions,skills "share only these"
+
+# Pi (https://pi.dev): load native auth.json, then run same- or cross-provider
+asx load pi personal
+asx e personal.pi -p "hello from isolated pi home"
+asx e personal.zai pi -i -- -p "hello via ZAI backend"
 ```
 
 ## 📋 Commands
